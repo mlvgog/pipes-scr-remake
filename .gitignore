@@ -1,0 +1,27 @@
+# Build artifacts
+*.exe
+*.scr
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.out
+*.pdb
+*.ilk
+*.exp
+*.gch
+*.d
+
+# Test renders from the /shot self-test mode
+*.bmp
+shot*.png
+
+# Editor / OS noise
+*.swp
+*~
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
