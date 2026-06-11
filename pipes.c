@@ -6,7 +6,9 @@
  *
  * Usage:
  *   pipes.exe              windowed (for development / casual viewing)
- *   pipes.exe /s           fullscreen screensaver mode (any input exits)
+ *   pipes.exe /s           fullscreen screensaver mode (any input exits);
+ *                          covers all monitors, one independent pipes
+ *                          scene per monitor
  *   pipes.exe /c           "configure" (no options; shows a message box)
  *   pipes.exe /p <hwnd>    preview mode (not supported; exits cleanly)
  *   pipes.exe /shot f.bmp [steps]   simulate N steps, render once, save BMP, exit
@@ -35,7 +37,7 @@
 #define BALL_R      0.44f   /* radius of ball joints (the big spheres)  */
 #define CAP_R       0.38f   /* radius of start/end caps                 */
 
-#define NUM_PIPES   4       /* pipes growing simultaneously             */
+#define NUM_PIPES   4       /* pipes growing simultaneously (per scene) */
 #define STEP_MS     45.0    /* ms between growth steps                  */
 #define P_STRAIGHT  0.55f   /* chance to keep going straight            */
 #define P_BALL      0.25f   /* chance a turn uses a ball joint          */
@@ -58,6 +60,7 @@
 #define TUBE_SLICES 18
 
 #define MAX_PRIMS   60000
+#define MAX_SCENES 8
 
 /* ------------------------------------------------------------------ */
 
@@ -81,25 +84,35 @@ typedef struct {
     float col[3];
 } Pipe;
 
+/*
+ * One independent pipes simulation + camera, rendered into its own GL
+ * viewport.  Fullscreen mode creates one Scene per monitor; windowed
+ * and /shot modes use a single Scene covering the client area.
+ */
+typedef struct {
+    int    vx, vy, vw, vh;          /* viewport rect, GL (bottom-left) coords */
+    int    NX, NY, NZ;
+    double aspect, dFront, camZ;
+    unsigned char grid[MAXX][MAXY][MAXZ];
+    Prim   prims[MAX_PRIMS];
+    int    nPrims;
+    Pipe   pipes[NUM_PIPES];
+    int    deaths;
+    int    holding;                  /* scene finished, waiting to clear */
+    ULONGLONG holdStart;
+} Scene;
+
 /* dirs: 0:+x 1:-x 2:+y 3:-y 4:+z 5:-z  (opposite = d ^ 1) */
 static const int DV[6][3] = {
     { 1, 0, 0}, {-1, 0, 0}, { 0, 1, 0}, { 0,-1, 0}, { 0, 0, 1}, { 0, 0,-1}
 };
 
-static Prim prims[MAX_PRIMS];
-static int  nPrims;
-
-static unsigned char grid[MAXX][MAXY][MAXZ];
-static int NX, NY = GRID_NY, NZ = GRID_NZ;
-
-static Pipe pipes[NUM_PIPES];
-static int  deaths;
-static int  holding;          /* scene finished, waiting to clear */
-static ULONGLONG holdStart;
+static Scene *scenes[MAX_SCENES];
+static int    nScenes;
 
 static GLuint dlCyl, dlSph, dlElb;
-static double camZ;
 static int    winW = 1280, winH = 720;
+static int    vsX, vsY;       /* virtual screen origin (fullscreen)    */
 static int    fullscreen;
 static HWND   hwnd;
 static HDC    hdc;
@@ -209,77 +222,77 @@ static void buildElbow(void)
 /* ------------------------------------------------------------------ */
 /* World <-> grid                                                      */
 
-static void nodeWorld(int x, int y, int z, float *w)
+static void nodeWorld(const Scene *s, int x, int y, int z, float *w)
 {
-    w[0] = (x - (NX - 1) * 0.5f) * CELL;
-    w[1] = (y - (NY - 1) * 0.5f) * CELL;
-    w[2] = (z - (NZ - 1) * 0.5f) * CELL;
+    w[0] = (x - (s->NX - 1) * 0.5f) * CELL;
+    w[1] = (y - (s->NY - 1) * 0.5f) * CELL;
+    w[2] = (z - (s->NZ - 1) * 0.5f) * CELL;
 }
 
 /* ------------------------------------------------------------------ */
 /* Primitive list                                                      */
 
-static int addPrim(int type, const float *col)
+static void scheduleReset(Scene *s)
+{
+    if (!s->holding) { s->holding = 1; s->holdStart = GetTickCount64(); }
+}
+
+static int addPrim(Scene *s, int type, const float *col)
 {
     Prim *p;
-    if (nPrims >= MAX_PRIMS) { holding = 1; holdStart = GetTickCount64(); return -1; }
-    p = &prims[nPrims];
+    if (s->nPrims >= MAX_PRIMS) { scheduleReset(s); return -1; }
+    p = &s->prims[s->nPrims];
     memset(p, 0, sizeof *p);
     p->type = type;
     p->col[0] = col[0]; p->col[1] = col[1]; p->col[2] = col[2];
-    return nPrims++;
+    return s->nPrims++;
 }
 
-static int addCyl(const float *start, int dir, float len, const float *col)
+static int addCyl(Scene *s, const float *start, int dir, float len, const float *col)
 {
-    int i = addPrim(PRIM_CYL, col);
+    int i = addPrim(s, PRIM_CYL, col);
     if (i < 0) return -1;
-    memcpy(prims[i].a, start, 3 * sizeof(float));
-    prims[i].d1 = dir;
-    prims[i].len = len;
+    memcpy(s->prims[i].a, start, 3 * sizeof(float));
+    s->prims[i].d1 = dir;
+    s->prims[i].len = len;
     return i;
 }
 
-static void addSph(const float *c, float r, const float *col)
+static void addSph(Scene *s, const float *c, float r, const float *col)
 {
-    int i = addPrim(PRIM_SPH, col);
+    int i = addPrim(s, PRIM_SPH, col);
     if (i < 0) return;
-    memcpy(prims[i].a, c, 3 * sizeof(float));
-    prims[i].r = r;
+    memcpy(s->prims[i].a, c, 3 * sizeof(float));
+    s->prims[i].r = r;
 }
 
-static void addElb(int x, int y, int z, int d1, int d2, const float *col)
+static void addElb(Scene *s, int x, int y, int z, int d1, int d2, const float *col)
 {
-    int i = addPrim(PRIM_ELB, col);
+    int i = addPrim(s, PRIM_ELB, col);
     if (i < 0) return;
-    nodeWorld(x, y, z, prims[i].a);
-    prims[i].d1 = d1;
-    prims[i].d2 = d2;
+    nodeWorld(s, x, y, z, s->prims[i].a);
+    s->prims[i].d1 = d1;
+    s->prims[i].d2 = d2;
 }
 
 /* ------------------------------------------------------------------ */
 /* Pipe simulation                                                     */
 
-static int inBounds(int x, int y, int z)
+static int inBounds(const Scene *s, int x, int y, int z)
 {
-    return x >= 0 && x < NX && y >= 0 && y < NY && z >= 0 && z < NZ;
+    return x >= 0 && x < s->NX && y >= 0 && y < s->NY && z >= 0 && z < s->NZ;
 }
 
-static void scheduleReset(void)
-{
-    if (!holding) { holding = 1; holdStart = GetTickCount64(); }
-}
-
-static int spawnPipe(Pipe *p)
+static int spawnPipe(Scene *s, Pipe *p)
 {
     int tries;
     for (tries = 0; tries < 400; tries++) {
-        int x = rand() % NX, y = rand() % NY, z = rand() % NZ;
+        int x = rand() % s->NX, y = rand() % s->NY, z = rand() % s->NZ;
         int d, free_nbr = 0;
-        if (grid[x][y][z]) continue;
+        if (s->grid[x][y][z]) continue;
         for (d = 0; d < 6; d++) {
             int nx = x + DV[d][0], ny = y + DV[d][1], nz = z + DV[d][2];
-            if (inBounds(nx, ny, nz) && !grid[nx][ny][nz]) { free_nbr = 1; break; }
+            if (inBounds(s, nx, ny, nz) && !s->grid[nx][ny][nz]) { free_nbr = 1; break; }
         }
         if (!free_nbr) continue;
         memset(p, 0, sizeof *p);
@@ -288,29 +301,29 @@ static int spawnPipe(Pipe *p)
         p->hasDir = 0;
         p->lastCyl = -1;
         randomColor(p->col);
-        grid[x][y][z] = 1;
+        s->grid[x][y][z] = 1;
         {
             float w[3];
-            nodeWorld(x, y, z, w);
-            addSph(w, CAP_R, p->col);   /* start cap */
+            nodeWorld(s, x, y, z, w);
+            addSph(s, w, CAP_R, p->col);   /* start cap */
         }
         return 1;
     }
     return 0;
 }
 
-static void killPipe(Pipe *p)
+static void killPipe(Scene *s, Pipe *p)
 {
     float w[3];
-    nodeWorld(p->x, p->y, p->z, w);
-    addSph(w, CAP_R, p->col);           /* end cap */
+    nodeWorld(s, p->x, p->y, p->z, w);
+    addSph(s, w, CAP_R, p->col);           /* end cap */
     p->alive = 0;
-    deaths++;
-    if (deaths >= DEATHS_RESET) { scheduleReset(); return; }
-    if (!spawnPipe(p)) scheduleReset();
+    s->deaths++;
+    if (s->deaths >= DEATHS_RESET) { scheduleReset(s); return; }
+    if (!spawnPipe(s, p)) scheduleReset(s);
 }
 
-static void stepPipe(Pipe *p)
+static void stepPipe(Scene *s, Pipe *p)
 {
     int cand[6], nc = 0, d;
     float w[3];
@@ -319,9 +332,9 @@ static void stepPipe(Pipe *p)
         int nx, ny, nz;
         if (p->hasDir && d == (p->dir ^ 1)) continue;
         nx = p->x + DV[d][0]; ny = p->y + DV[d][1]; nz = p->z + DV[d][2];
-        if (inBounds(nx, ny, nz) && !grid[nx][ny][nz]) cand[nc++] = d;
+        if (inBounds(s, nx, ny, nz) && !s->grid[nx][ny][nz]) cand[nc++] = d;
     }
-    if (nc == 0) { killPipe(p); return; }
+    if (nc == 0) { killPipe(s, p); return; }
 
     d = -1;
     if (p->hasDir && frand() < P_STRAIGHT) {
@@ -330,88 +343,121 @@ static void stepPipe(Pipe *p)
     }
     if (d < 0) d = cand[rand() % nc];
 
-    nodeWorld(p->x, p->y, p->z, w);
+    nodeWorld(s, p->x, p->y, p->z, w);
 
     if (!p->hasDir) {
-        p->lastCyl = addCyl(w, d, CELL, p->col);
+        p->lastCyl = addCyl(s, w, d, CELL, p->col);
     } else if (d == p->dir) {
-        if (p->lastCyl >= 0) prims[p->lastCyl].len += CELL;
-        else p->lastCyl = addCyl(w, d, CELL, p->col);
+        if (p->lastCyl >= 0) s->prims[p->lastCyl].len += CELL;
+        else p->lastCyl = addCyl(s, w, d, CELL, p->col);
     } else if (frand() < P_BALL) {
         /* ball joint: cylinders meet at the node, big sphere covers it */
-        addSph(w, BALL_R, p->col);
-        p->lastCyl = addCyl(w, d, CELL, p->col);
+        addSph(s, w, BALL_R, p->col);
+        p->lastCyl = addCyl(s, w, d, CELL, p->col);
     } else {
         /* elbow joint: retract the incoming cylinder, insert quarter torus */
-        float s[3];
-        if (p->lastCyl >= 0) prims[p->lastCyl].len -= ELBOW_R;
-        addElb(p->x, p->y, p->z, p->dir, d, p->col);
-        s[0] = w[0] + DV[d][0] * ELBOW_R;
-        s[1] = w[1] + DV[d][1] * ELBOW_R;
-        s[2] = w[2] + DV[d][2] * ELBOW_R;
-        p->lastCyl = addCyl(s, d, CELL - ELBOW_R, p->col);
+        float st[3];
+        if (p->lastCyl >= 0) s->prims[p->lastCyl].len -= ELBOW_R;
+        addElb(s, p->x, p->y, p->z, p->dir, d, p->col);
+        st[0] = w[0] + DV[d][0] * ELBOW_R;
+        st[1] = w[1] + DV[d][1] * ELBOW_R;
+        st[2] = w[2] + DV[d][2] * ELBOW_R;
+        p->lastCyl = addCyl(s, st, d, CELL - ELBOW_R, p->col);
     }
 
     p->dir = d;
     p->hasDir = 1;
     p->x += DV[d][0]; p->y += DV[d][1]; p->z += DV[d][2];
-    grid[p->x][p->y][p->z] = 1;
+    s->grid[p->x][p->y][p->z] = 1;
 }
 
-static void resetScene(void)
+static void sceneReset(Scene *s)
 {
     int i;
-    memset(grid, 0, sizeof grid);
-    nPrims = 0;
-    deaths = 0;
-    holding = 0;
+    memset(s->grid, 0, sizeof s->grid);
+    s->nPrims = 0;
+    s->deaths = 0;
+    s->holding = 0;
     for (i = 0; i < NUM_PIPES; i++)
-        if (!spawnPipe(&pipes[i])) pipes[i].alive = 0;
+        if (!spawnPipe(s, &s->pipes[i])) s->pipes[i].alive = 0;
 }
 
-static void tick(void)
+static void sceneTick(Scene *s)
 {
     int i;
-    if (holding) {
-        if (GetTickCount64() - holdStart >= HOLD_MS) resetScene();
+    if (s->holding) {
+        if (GetTickCount64() - s->holdStart >= HOLD_MS) sceneReset(s);
         return;
     }
     for (i = 0; i < NUM_PIPES; i++) {
-        if (holding) break;
-        if (pipes[i].alive) stepPipe(&pipes[i]);
+        if (s->holding) break;
+        if (s->pipes[i].alive) stepPipe(s, &s->pipes[i]);
     }
+}
+
+static void tickAll(void)
+{
+    int i;
+    for (i = 0; i < nScenes; i++) sceneTick(scenes[i]);
+}
+
+/* ------------------------------------------------------------------ */
+/* Scene setup                                                         */
+
+/*
+ * Derive the camera and grid extents from the viewport rect.  The grid
+ * X extent is fixed on first call (so a window resize re-aims the
+ * camera but keeps the existing pipes); vertical extent is constant.
+ */
+static void sceneGeometry(Scene *s)
+{
+    double tanHalf = tan(FOV_Y * 0.5 * M_PI / 180.0);
+    s->aspect = (s->vh > 0) ? (double)s->vw / (double)s->vh : 1.0;
+    s->dFront = (s->NY * CELL * 0.5 * 0.94) / tanHalf;
+    s->camZ = s->NZ * CELL * 0.5 + s->dFront;
+    if (s->NX == 0) {
+        /* size the grid X extent so pipes fill the width at mid-depth */
+        double hx = tanHalf * s->aspect * (s->dFront + s->NZ * CELL * 0.5);
+        int nx = (int)(hx * 2.0 / CELL) + 1;
+        if (nx > MAXX) nx = MAXX;
+        if (nx < 8) nx = 8;
+        s->NX = nx;
+    }
+}
+
+static Scene *sceneCreate(int vx, int vy, int vw, int vh)
+{
+    Scene *s = (Scene *)calloc(1, sizeof(Scene));
+    if (!s) return NULL;
+    s->vx = vx; s->vy = vy; s->vw = vw; s->vh = vh;
+    s->NY = GRID_NY;
+    s->NZ = GRID_NZ;
+    sceneGeometry(s);
+    sceneReset(s);
+    return s;
+}
+
+/*
+ * Fullscreen: one scene per physical monitor.  The window spans the
+ * whole virtual screen; monitor rects are translated into window
+ * client coordinates and then into GL's bottom-left viewport origin.
+ */
+static BOOL CALLBACK monitorEnum(HMONITOR hm, HDC hdcMon, LPRECT rc, LPARAM lp)
+{
+    int x, yTop, w, h;
+    (void)hm; (void)hdcMon; (void)lp;
+    if (nScenes >= MAX_SCENES) return FALSE;
+    x = rc->left - vsX;
+    yTop = rc->top - vsY;
+    w = rc->right - rc->left;
+    h = rc->bottom - rc->top;
+    scenes[nScenes] = sceneCreate(x, winH - (yTop + h), w, h);
+    if (scenes[nScenes]) nScenes++;
+    return TRUE;
 }
 
 /* ------------------------------------------------------------------ */
 /* Rendering                                                           */
-
-static void setProjection(int w, int h)
-{
-    double aspect = (h > 0) ? (double)w / (double)h : 1.0;
-    double tanHalf = tan(FOV_Y * 0.5 * M_PI / 180.0);
-    double dFront = (NY * CELL * 0.5 * 0.94) / tanHalf;
-    double znear, zfar, t;
-
-    camZ = NZ * CELL * 0.5 + dFront;
-    znear = dFront * 0.45;
-    zfar = camZ + NZ * CELL + 5.0;
-
-    glViewport(0, 0, w, h);
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    t = tanHalf * znear;
-    glFrustum(-t * aspect, t * aspect, -t, t, znear, zfar);
-    glMatrixMode(GL_MODELVIEW);
-
-    /* size the grid X extent so pipes fill the width at mid-depth */
-    {
-        double hx = tanHalf * aspect * (dFront + NZ * CELL * 0.5);
-        int nx = (int)(hx * 2.0 / CELL) + 1;
-        if (nx > MAXX) nx = MAXX;
-        if (nx < 8) nx = 8;
-        if (NX == 0) NX = nx;   /* fixed after first call */
-    }
-}
 
 static void drawCylRot(int dir)
 {
@@ -425,16 +471,24 @@ static void drawCylRot(int dir)
     }
 }
 
-static void drawScene(void)
+static void sceneDraw(const Scene *s)
 {
+    double znear = s->dFront * 0.45;
+    double zfar = s->camZ + s->NZ * CELL + 5.0;
+    double tanHalf = tan(FOV_Y * 0.5 * M_PI / 180.0);
+    double t = tanHalf * znear;
     int i;
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glLoadIdentity();
-    glTranslatef(0.0f, 0.0f, (float)-camZ);
 
-    for (i = 0; i < nPrims; i++) {
-        Prim *p = &prims[i];
+    glViewport(s->vx, s->vy, s->vw, s->vh);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glFrustum(-t * s->aspect, t * s->aspect, -t, t, znear, zfar);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glTranslatef(0.0f, 0.0f, (float)-s->camZ);
+
+    for (i = 0; i < s->nPrims; i++) {
+        const Prim *p = &s->prims[i];
         glColor3fv(p->col);
         glPushMatrix();
         switch (p->type) {
@@ -472,6 +526,14 @@ static void drawScene(void)
         }
         glPopMatrix();
     }
+}
+
+static void drawAll(void)
+{
+    int i;
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    for (i = 0; i < nScenes; i++) sceneDraw(scenes[i]);
 }
 
 static void initGL(void)
@@ -557,7 +619,11 @@ static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_SIZE:
         winW = LOWORD(lp); winH = HIWORD(lp);
-        if (hrc) setProjection(winW, winH);
+        if (!fullscreen && nScenes == 1) {
+            scenes[0]->vw = winW;
+            scenes[0]->vh = winH;
+            sceneGeometry(scenes[0]);
+        }
         return 0;
     case WM_KEYDOWN:
         if (fullscreen || wp == VK_ESCAPE) DestroyWindow(h);
@@ -637,10 +703,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
     RegisterClass(&wc);
 
     if (fullscreen) {
-        winW = GetSystemMetrics(SM_CXSCREEN);
-        winH = GetSystemMetrics(SM_CYSCREEN);
+        /* cover the whole virtual desktop (all monitors) */
+        vsX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        vsY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        winW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        winH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
         hwnd = CreateWindowEx(WS_EX_TOPMOST, wc.lpszClassName, "3D Pipes",
-                              WS_POPUP | WS_VISIBLE, 0, 0, winW, winH,
+                              WS_POPUP | WS_VISIBLE, vsX, vsY, winW, winH,
                               NULL, NULL, hInst, NULL);
     } else {
         RECT r = { 0, 0, winW, winH };
@@ -668,7 +737,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
 
     {
         PFNWGLSWAPINTERVALEXT swapInterval =
-            (PFNWGLSWAPINTERVALEXT)wglGetProcAddress("wglSwapIntervalEXT");
+            (PFNWGLSWAPINTERVALEXT)(void *)wglGetProcAddress("wglSwapIntervalEXT");
         if (swapInterval) swapInterval(1);
     }
 
@@ -678,17 +747,24 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
         GetClientRect(hwnd, &cr);
         winW = cr.right; winH = cr.bottom;
     }
-    NX = 0;
-    setProjection(winW, winH);
-    resetScene();
+
+    if (fullscreen)
+        EnumDisplayMonitors(NULL, NULL, monitorEnum, 0);
+    if (nScenes == 0) {
+        scenes[0] = sceneCreate(0, 0, winW, winH);
+        if (!scenes[0]) return 1;
+        nScenes = 1;
+    }
 
     if (shotMode) {
-        int i;
+        int i, j;
         for (i = 0; i < shotSteps; i++) {
-            if (holding) break;     /* scene finished early */
-            tick();
+            int anyRunning = 0;
+            for (j = 0; j < nScenes; j++) if (!scenes[j]->holding) anyRunning = 1;
+            if (!anyRunning) break;     /* scene finished early */
+            tickAll();
         }
-        drawScene();
+        drawAll();
         glFinish();
         saveBMP(shotFile, winW, winH);
         SwapBuffers(hdc);
@@ -718,11 +794,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
         last = now;
         if (acc > 500.0) acc = 500.0;
         while (acc >= STEP_MS) {
-            tick();
+            tickAll();
             acc -= STEP_MS;
         }
 
-        drawScene();
+        drawAll();
         SwapBuffers(hdc);
     }
 

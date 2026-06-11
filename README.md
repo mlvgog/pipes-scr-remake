@@ -27,6 +27,10 @@ Win32 and fixed-function OpenGL 1.1 — the same technology as the original.
   then a new one starts elsewhere.
 - When the scene has filled up, it holds for a moment, clears to black
   abruptly, and starts over — just like the original.
+- **Multi-monitor**: fullscreen mode covers the entire virtual desktop and
+  runs an independent pipes scene on every monitor (an improvement over the
+  original, which left secondary monitors showing the desktop). Input on
+  any monitor dismisses it.
 
 ## Build
 
@@ -50,7 +54,7 @@ MSVC works too: `cl /O2 pipes.c /link opengl32.lib gdi32.lib user32.lib /subsyst
 | Command | Behavior |
 |---|---|
 | `pipes.exe` | Windowed (1280x720), Esc to quit |
-| `pipes.exe /s` | Fullscreen screensaver mode — any key, click, or mouse movement exits |
+| `pipes.exe /s` | Fullscreen on all monitors — any key, click, or mouse movement exits |
 | `pipes.exe /c` | Screensaver "configure" stub |
 | `pipes.exe /shot out.bmp [steps]` | Simulate N growth steps, render one frame to a BMP, exit (used for visual testing) |
 
@@ -85,8 +89,6 @@ implemented:
 - **Preview pane mode** — `/p <hwnd>` (the little preview inside the
   screensaver settings dialog) exits cleanly instead of rendering.
 - **Textured pipes** — the original's optional marble/texture surface mode.
-- **Multi-monitor support** — fullscreen mode covers the primary monitor
-  only.
 
 ## Tuning
 
