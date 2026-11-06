@@ -84,7 +84,9 @@ simulates N growth steps (default 700; ~140 gives a pleasing mid-stage
 scene), renders one frame, writes a BMP, and exits with code 0 (1 if the BMP
 could not be written). A seed makes the picture reproducible byte for byte.
 The shot window is a borderless 1280×720 popup at the screen origin, so its
-size does not depend on the desktop size.
+size does not depend on the desktop size. (On a desktop smaller than that
+with a hardware OpenGL driver, the off-screen part of the read-back is
+undefined; GDI generic, Mesa and Wine render to memory and are fine.)
 
 `pipes.exe` is a GUI app (`-mwindows`), so PowerShell does not wait for it;
 use `Start-Process -Wait`, then convert the BMP to PNG so the Read tool can

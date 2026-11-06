@@ -615,7 +615,11 @@ static const char *readWord(const char *s, char *word, size_t size)
 
 static int switchIs(const char *arg, const char *name)
 {
-    return _strnicmp(arg, name, strlen(name)) == 0;
+    size_t n = strlen(name);
+    char next;
+    if (_strnicmp(arg, name, n) != 0) return 0;
+    next = arg[n];
+    return next == 0 || next == ' ' || next == '\t' || next == ':';
 }
 
 static void parseShotArguments(const char *rest, LaunchOptions *out)
@@ -852,9 +856,15 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
     srand(options.hasShotSeed ? options.shotSeed
                               : (unsigned)time(NULL) ^ (unsigned)GetCurrentProcessId());
 
-    if (!createGLWindow(hInst, options.mode)) return 1;
+    if (!createGLWindow(hInst, options.mode)) {
+        destroyGLWindow();
+        return 1;
+    }
     initGL();
-    if (!createScenes()) return 1;
+    if (!createScenes()) {
+        destroyGLWindow();
+        return 1;
+    }
 
     result = options.mode == MODE_SHOT ? runShot(&options) : runInteractive();
 
