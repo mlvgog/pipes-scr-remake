@@ -805,11 +805,34 @@ static int windowShowsText(HWND h, const char *text)
     return search.found;
 }
 
-static void clickDialogButton(HWND dialog, int buttonId)
+typedef struct {
+    const char *label;
+    HWND found;
+} ButtonSearch;
+
+static BOOL CALLBACK matchButtonLabel(HWND h, LPARAM lp)
 {
-    HWND button = GetDlgItem(dialog, buttonId);
+    ButtonSearch *search = (ButtonSearch *)lp;
+    char className[32], text[64];
+    GetClassNameA(h, className, sizeof className);
+    GetWindowTextA(h, text, sizeof text);
+    if (_stricmp(className, "Button") == 0 && strcmp(text, search->label) == 0) {
+        search->found = h;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static int clickButtonLabelled(HWND dialog, const char *label)
+{
+    ButtonSearch search;
+    search.label = label;
+    search.found = NULL;
+    EnumChildWindows(dialog, matchButtonLabel, (LPARAM)&search);
+    if (!search.found) return 0;
     Sleep(DIALOG_SETTLE_MS);
-    PostMessage(dialog, WM_COMMAND, MAKEWPARAM(buttonId, BN_CLICKED), (LPARAM)button);
+    PostMessage(dialog, WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(search.found), BN_CLICKED), (LPARAM)search.found);
+    return 1;
 }
 
 static void pressKey(HWND h, WPARAM key)
@@ -991,7 +1014,7 @@ static void the_configure_option_explains_that_there_is_nothing_to_set_up(void)
     expect(box != NULL, "a message box to appear");
     if (box) {
         expect(windowShowsText(box, "3D Pipes has no options to configure."), "the message to explain there are no options");
-        clickDialogButton(box, IDOK);
+        expect(clickButtonLabelled(box, "OK"), "the message box to have an OK button");
         expect(finishesWithin(&p, 10000, &code), "pressing OK to end the program");
         expectNumber("exit code", 0, code);
     }
