@@ -1,6 +1,3 @@
-# Build script for the 3D Pipes screensaver recreation.
-# Requires MSYS2 ucrt64 gcc (or any MinGW-w64 gcc on PATH as `gcc`).
-
 $gcc = "C:\msys64\ucrt64\bin\gcc.exe"
 if (-not (Test-Path $gcc)) {
     $cmd = Get-Command gcc -ErrorAction SilentlyContinue
