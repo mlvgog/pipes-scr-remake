@@ -99,6 +99,10 @@ static LaunchOptions parsed(const char *commandLine)
 static Scene *emptyScene(void)
 {
     Scene *s = (Scene *)calloc(1, sizeof(Scene));
+    if (!s) {
+        fprintf(stderr, "out of memory while building a test scene\n");
+        exit(2);
+    }
     s->vw = 1280;
     s->vh = 720;
     s->NY = GRID_NY;
@@ -235,6 +239,13 @@ static void slash_shot_uses_sensible_defaults_when_details_are_missing(void)
     expectText("file name when only a file is given", "picture.bmp", fileOnly.shotFile);
     expectNumber("step count when only a file is given", DEFAULT_SHOT_STEPS, fileOnly.shotSteps);
     expectNumber("step count when the steps are not a number", DEFAULT_SHOT_STEPS, badSteps.shotSteps);
+}
+
+static void unknown_or_run_together_switches_open_the_windowed_viewer(void)
+{
+    expectNumber("mode for /settings", MODE_WINDOWED, parsed("/settings").mode);
+    expectNumber("mode for /shotout.bmp", MODE_WINDOWED, parsed("/shotout.bmp").mode);
+    expectNumber("mode for /x", MODE_WINDOWED, parsed("/x").mode);
 }
 
 static void slash_c_asks_for_the_configuration_screen(void)
@@ -639,6 +650,19 @@ static void drainQuitMessage(void)
     while (PeekMessage(&m, NULL, WM_QUIT, WM_QUIT, PM_REMOVE)) {}
 }
 
+static void removeOldOutputs(void)
+{
+    WIN32_FIND_DATAA found;
+    char path[MAX_PATH];
+    HANDLE h = FindFirstFileA(OUTPUT_DIR "\\*.bmp", &found);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        snprintf(path, sizeof path, OUTPUT_DIR "\\%s", found.cFileName);
+        DeleteFileA(path);
+    } while (FindNextFileA(h, &found));
+    FindClose(h);
+}
+
 static void a_screenshot_of_an_odd_sized_window_is_a_valid_bitmap(void)
 {
     const char *path = OUTPUT_DIR "\\odd-size.bmp";
@@ -648,7 +672,13 @@ static void a_screenshot_of_an_odd_sized_window_is_a_valid_bitmap(void)
     winH = 201;
     fullscreen = 0;
     srand(9);
-    expect(createGLWindow(GetModuleHandle(NULL), MODE_SHOT), "an OpenGL window to open");
+    if (!createGLWindow(GetModuleHandle(NULL), MODE_SHOT)) {
+        expect(0, "an OpenGL window to open");
+        destroyGLWindow();
+        drainQuitMessage();
+        restoreScreenDefaults();
+        return;
+    }
     initGL();
     createScenes();
     for (i = 0; i < 140; i++) tickAll();
@@ -930,8 +960,12 @@ static void the_screensaver_ignores_a_tiny_mouse_twitch_but_closes_on_a_real_mov
     w = waitForWindow(&p, WINDOW_CLASS);
     expect(w != NULL, "a screensaver window to appear");
     if (w) {
+        POINT where;
         Sleep(500);
         SetCursorPos(202, 203);
+        GetCursorPos(&where);
+        expect(where.x == 202 && where.y == 203,
+               "the test machine to let the mouse cursor be moved (otherwise this test cannot run)");
         PostMessage(w, WM_MOUSEMOVE, 0, MAKELPARAM(202, 203));
         expect(stillRunningAfter(&p, 1000), "a move of a few pixels to be ignored");
         SetCursorPos(260, 260);
@@ -969,6 +1003,7 @@ int main(int argc, char **argv)
 {
     if (argc > 1) snprintf(pipesExe, sizeof pipesExe, "%s", argv[1]);
     CreateDirectoryA(OUTPUT_DIR, NULL);
+    removeOldOutputs();
     setvbuf(stdout, NULL, _IONBF, 0);
     printf("3D Pipes test suite (program under test: %s)\n", pipesExe);
 
@@ -978,6 +1013,7 @@ int main(int argc, char **argv)
     run(slash_shot_is_never_mistaken_for_slash_s);
     run(slash_shot_reads_the_file_name_step_count_and_seed);
     run(slash_shot_uses_sensible_defaults_when_details_are_missing);
+    run(unknown_or_run_together_switches_open_the_windowed_viewer);
     run(slash_c_asks_for_the_configuration_screen);
     run(slash_p_asks_for_the_preview_pane);
 
