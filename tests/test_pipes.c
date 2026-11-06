@@ -654,7 +654,7 @@ static void drainQuitMessage(void)
 static void removeOldOutputs(void)
 {
     WIN32_FIND_DATAA found;
-    char path[MAX_PATH];
+    char path[sizeof OUTPUT_DIR + MAX_PATH + 1];
     HANDLE h = FindFirstFileA(OUTPUT_DIR "\\*.bmp", &found);
     if (h == INVALID_HANDLE_VALUE) return;
     do {
