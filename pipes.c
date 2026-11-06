@@ -39,7 +39,12 @@
 #define TUBE_SLICES 18
 
 #define MAX_PRIMS   60000
-#define MAX_SCENES 8
+#define MAX_SCENES  8
+
+#define DEFAULT_SHOT_STEPS 700
+#define WINDOWED_WIDTH     1280
+#define WINDOWED_HEIGHT    720
+#define MOUSE_EXIT_SLOP    4
 
 enum { PRIM_CYL, PRIM_SPH, PRIM_ELB };
 
@@ -74,6 +79,22 @@ typedef struct {
     ULONGLONG holdStart;
 } Scene;
 
+typedef enum {
+    MODE_WINDOWED,
+    MODE_FULLSCREEN,
+    MODE_CONFIGURE,
+    MODE_PREVIEW,
+    MODE_SHOT
+} LaunchMode;
+
+typedef struct {
+    LaunchMode mode;
+    char       shotFile[MAX_PATH];
+    int        shotSteps;
+    int        hasShotSeed;
+    unsigned   shotSeed;
+} LaunchOptions;
+
 static const int DV[6][3] = {
     { 1, 0, 0}, {-1, 0, 0}, { 0, 1, 0}, { 0,-1, 0}, { 0, 0, 1}, { 0, 0,-1}
 };
@@ -82,7 +103,7 @@ static Scene *scenes[MAX_SCENES];
 static int    nScenes;
 
 static GLuint dlCyl, dlSph, dlElb;
-static int    winW = 1280, winH = 720;
+static int    winW = WINDOWED_WIDTH, winH = WINDOWED_HEIGHT;
 static int    vsX, vsY;
 static int    fullscreen;
 static HWND   hwnd;
@@ -300,11 +321,9 @@ static void stepPipe(Scene *s, Pipe *p)
         if (p->lastCyl >= 0) s->prims[p->lastCyl].len += CELL;
         else p->lastCyl = addCyl(s, w, d, CELL, p->col);
     } else if (frand() < P_BALL) {
-
         addSph(s, w, BALL_R, p->col);
         p->lastCyl = addCyl(s, w, d, CELL, p->col);
     } else {
-
         float st[3];
         if (p->lastCyl >= 0) s->prims[p->lastCyl].len -= ELBOW_R;
         addElb(s, p->x, p->y, p->z, p->dir, d, p->col);
@@ -350,6 +369,13 @@ static void tickAll(void)
     for (i = 0; i < nScenes; i++) sceneTick(scenes[i]);
 }
 
+static int anySceneRunning(void)
+{
+    int i;
+    for (i = 0; i < nScenes; i++) if (!scenes[i]->holding) return 1;
+    return 0;
+}
+
 static void sceneGeometry(Scene *s)
 {
     double tanHalf = tan(FOV_Y * 0.5 * M_PI / 180.0);
@@ -357,7 +383,6 @@ static void sceneGeometry(Scene *s)
     s->dFront = (s->NY * CELL * 0.5 * 0.94) / tanHalf;
     s->camZ = s->NZ * CELL * 0.5 + s->dFront;
     if (s->NX == 0) {
-
         double hx = tanHalf * s->aspect * (s->dFront + s->NZ * CELL * 0.5);
         int nx = (int)(hx * 2.0 / CELL) + 1;
         if (nx > MAXX) nx = MAXX;
@@ -392,6 +417,28 @@ static BOOL CALLBACK monitorEnum(HMONITOR hm, HDC hdcMon, LPRECT rc, LPARAM lp)
     return TRUE;
 }
 
+static int createScenes(void)
+{
+    if (fullscreen)
+        EnumDisplayMonitors(NULL, NULL, monitorEnum, 0);
+    if (nScenes == 0) {
+        scenes[0] = sceneCreate(0, 0, winW, winH);
+        if (!scenes[0]) return 0;
+        nScenes = 1;
+    }
+    return 1;
+}
+
+static void destroyScenes(void)
+{
+    int i;
+    for (i = 0; i < nScenes; i++) {
+        free(scenes[i]);
+        scenes[i] = NULL;
+    }
+    nScenes = 0;
+}
+
 static void drawCylRot(int dir)
 {
     switch (dir) {
@@ -402,6 +449,25 @@ static void drawCylRot(int dir)
     case 4: break;
     case 5: glRotatef(180.0f, 0, 1, 0); break;
     }
+}
+
+static void elbowMatrix(const Prim *p, float *m)
+{
+    const int *v1 = DV[p->d1], *v2 = DV[p->d2];
+    float X[3], Y[3], Z[3], C[3];
+    int k;
+    for (k = 0; k < 3; k++) {
+        Y[k] = (float)v1[k];
+        X[k] = (float)-v2[k];
+        C[k] = p->a[k] - ELBOW_R * v1[k] + ELBOW_R * v2[k];
+    }
+    Z[0] = X[1] * Y[2] - X[2] * Y[1];
+    Z[1] = X[2] * Y[0] - X[0] * Y[2];
+    Z[2] = X[0] * Y[1] - X[1] * Y[0];
+    m[0] = X[0]; m[1] = X[1]; m[2]  = X[2]; m[3]  = 0;
+    m[4] = Y[0]; m[5] = Y[1]; m[6]  = Y[2]; m[7]  = 0;
+    m[8] = Z[0]; m[9] = Z[1]; m[10] = Z[2]; m[11] = 0;
+    m[12] = C[0]; m[13] = C[1]; m[14] = C[2]; m[15] = 1;
 }
 
 static void sceneDraw(const Scene *s)
@@ -437,21 +503,8 @@ static void sceneDraw(const Scene *s)
             glCallList(dlSph);
             break;
         case PRIM_ELB: {
-            const int *v1 = DV[p->d1], *v2 = DV[p->d2];
-            float X[3], Y[3], Z[3], C[3], m[16];
-            int k;
-            for (k = 0; k < 3; k++) {
-                Y[k] = (float)v1[k];
-                X[k] = (float)-v2[k];
-                C[k] = p->a[k] - ELBOW_R * v1[k] + ELBOW_R * v2[k];
-            }
-            Z[0] = X[1] * Y[2] - X[2] * Y[1];
-            Z[1] = X[2] * Y[0] - X[0] * Y[2];
-            Z[2] = X[0] * Y[1] - X[1] * Y[0];
-            m[0] = X[0]; m[1] = X[1]; m[2]  = X[2]; m[3]  = 0;
-            m[4] = Y[0]; m[5] = Y[1]; m[6]  = Y[2]; m[7]  = 0;
-            m[8] = Z[0]; m[9] = Z[1]; m[10] = Z[2]; m[11] = 0;
-            m[12] = C[0]; m[13] = C[1]; m[14] = C[2]; m[15] = 1;
+            float m[16];
+            elbowMatrix(p, m);
             glMultMatrixf(m);
             glCallList(dlElb);
             break;
@@ -496,9 +549,14 @@ static void initGL(void)
     buildElbow();
 }
 
+static int bmpRowStride(int width)
+{
+    return (width * 3 + 3) & ~3;
+}
+
 static int saveBMP(const char *path, int w, int h)
 {
-    int stride = (w * 3 + 3) & ~3;
+    int stride = bmpRowStride(w);
     unsigned char *buf = (unsigned char *)malloc((size_t)stride * h);
     BITMAPFILEHEADER bfh;
     BITMAPINFOHEADER bih;
@@ -509,7 +567,6 @@ static int saveBMP(const char *path, int w, int h)
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     glReadBuffer(GL_BACK);
     glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, buf);
-
     for (y = 0; y < h; y++) {
         unsigned char *row = buf + (size_t)y * stride;
         for (x = 0; x < w; x++) {
@@ -538,6 +595,66 @@ static int saveBMP(const char *path, int w, int h)
     return 1;
 }
 
+static const char *skipBlanks(const char *s)
+{
+    while (*s == ' ' || *s == '\t') s++;
+    return s;
+}
+
+static const char *readWord(const char *s, char *word, size_t size)
+{
+    size_t n = 0;
+    s = skipBlanks(s);
+    while (*s && *s != ' ' && *s != '\t') {
+        if (n + 1 < size) word[n++] = *s;
+        s++;
+    }
+    word[n] = 0;
+    return s;
+}
+
+static int switchIs(const char *arg, const char *name)
+{
+    return _strnicmp(arg, name, strlen(name)) == 0;
+}
+
+static void parseShotArguments(const char *rest, LaunchOptions *out)
+{
+    char word[MAX_PATH];
+    rest = readWord(rest, word, sizeof word);
+    if (word[0]) snprintf(out->shotFile, sizeof out->shotFile, "%s", word);
+    rest = readWord(rest, word, sizeof word);
+    if (word[0]) {
+        out->shotSteps = atoi(word);
+        if (out->shotSteps <= 0) out->shotSteps = DEFAULT_SHOT_STEPS;
+    }
+    readWord(rest, word, sizeof word);
+    if (word[0]) {
+        out->shotSeed = (unsigned)strtoul(word, NULL, 10);
+        out->hasShotSeed = 1;
+    }
+}
+
+static void parseCommandLine(const char *cmdLine, LaunchOptions *out)
+{
+    const char *a = skipBlanks(cmdLine ? cmdLine : "");
+    memset(out, 0, sizeof *out);
+    out->mode = MODE_WINDOWED;
+    out->shotSteps = DEFAULT_SHOT_STEPS;
+    strcpy(out->shotFile, "pipes_shot.bmp");
+
+    if (switchIs(a, "/shot")) {
+        out->mode = MODE_SHOT;
+        parseShotArguments(a + 5, out);
+    } else if (switchIs(a, "/s") || switchIs(a, "-s")) {
+        out->mode = MODE_FULLSCREEN;
+    } else if (switchIs(a, "/c")) {
+        out->mode = MODE_CONFIGURE;
+    } else if (switchIs(a, "/p")) {
+        out->mode = MODE_PREVIEW;
+    }
+}
+
 static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
@@ -563,7 +680,8 @@ static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             POINT pt;
             GetCursorPos(&pt);
             if (!haveMouseStart) { mouseStart = pt; haveMouseStart = 1; }
-            else if (abs(pt.x - mouseStart.x) > 4 || abs(pt.y - mouseStart.y) > 4)
+            else if (abs(pt.x - mouseStart.x) > MOUSE_EXIT_SLOP ||
+                     abs(pt.y - mouseStart.y) > MOUSE_EXIT_SLOP)
                 DestroyWindow(h);
         }
         return 0;
@@ -576,78 +694,54 @@ static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 
 typedef BOOL (WINAPI *PFNWGLSWAPINTERVALEXT)(int);
 
-int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
+static const char *const WINDOW_CLASS = "PipesWnd";
+static const char *const WINDOW_TITLE = "3D Pipes";
+
+static void registerWindowClass(HINSTANCE hInst)
 {
     WNDCLASS wc;
-    PIXELFORMATDESCRIPTOR pfd;
-    int pf;
-    MSG msg;
-    int running = 1;
-    int shotMode = 0, shotSteps = 700;
-    char shotFile[MAX_PATH] = "pipes_shot.bmp";
-    LARGE_INTEGER freq, last, now;
-    double acc = 0.0;
-
-    (void)hPrev; (void)nShow;
-
-    {
-        char *a = cmdLine;
-        while (*a == ' ') a++;
-        if (_strnicmp(a, "/shot", 5) == 0) {
-            shotMode = 1;
-            a += 5;
-            while (*a == ' ') a++;
-            if (*a) {
-                char *sp = strchr(a, ' ');
-                if (sp) {
-                    *sp = 0;
-                    shotSteps = atoi(sp + 1);
-                    if (shotSteps <= 0) shotSteps = 700;
-                }
-                strncpy(shotFile, a, MAX_PATH - 1);
-            }
-        } else if (_strnicmp(a, "/s", 2) == 0 || _strnicmp(a, "-s", 2) == 0) {
-            fullscreen = 1;
-        } else if (_strnicmp(a, "/c", 2) == 0) {
-            MessageBoxA(NULL, "3D Pipes has no options to configure.",
-                        "3D Pipes", MB_OK | MB_ICONINFORMATION);
-            return 0;
-        } else if (_strnicmp(a, "/p", 2) == 0) {
-            return 0;
-        }
-    }
-
-    srand((unsigned)time(NULL) ^ (unsigned)GetCurrentProcessId());
-
     memset(&wc, 0, sizeof wc);
     wc.style = CS_OWNDC | CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = wndProc;
     wc.hInstance = hInst;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
-    wc.lpszClassName = "PipesWnd";
+    wc.lpszClassName = WINDOW_CLASS;
     RegisterClass(&wc);
+}
 
-    if (fullscreen) {
-
+static HWND createAppWindow(HINSTANCE hInst, LaunchMode mode)
+{
+    if (mode == MODE_FULLSCREEN) {
         vsX = GetSystemMetrics(SM_XVIRTUALSCREEN);
         vsY = GetSystemMetrics(SM_YVIRTUALSCREEN);
         winW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
         winH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-        hwnd = CreateWindowEx(WS_EX_TOPMOST, wc.lpszClassName, "3D Pipes",
+        return CreateWindowEx(WS_EX_TOPMOST, WINDOW_CLASS, WINDOW_TITLE,
                               WS_POPUP | WS_VISIBLE, vsX, vsY, winW, winH,
                               NULL, NULL, hInst, NULL);
-    } else {
-        RECT r = { 0, 0, winW, winH };
+    }
+    if (mode == MODE_SHOT) {
+        return CreateWindowEx(WS_EX_TOOLWINDOW, WINDOW_CLASS, WINDOW_TITLE,
+                              WS_POPUP | WS_VISIBLE, 0, 0, winW, winH,
+                              NULL, NULL, hInst, NULL);
+    }
+    {
+        RECT r;
+        r.left = 0; r.top = 0; r.right = winW; r.bottom = winH;
         AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-        hwnd = CreateWindow(wc.lpszClassName, "3D Pipes",
+        return CreateWindow(WINDOW_CLASS, WINDOW_TITLE,
                             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                             CW_USEDEFAULT, CW_USEDEFAULT,
                             r.right - r.left, r.bottom - r.top,
                             NULL, NULL, hInst, NULL);
     }
-    if (!hwnd) return 1;
+}
 
+static int attachGLContext(void)
+{
+    PIXELFORMATDESCRIPTOR pfd;
+    int pf;
     hdc = GetDC(hwnd);
     memset(&pfd, 0, sizeof pfd);
     pfd.nSize = sizeof pfd;
@@ -657,49 +751,59 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
     pfd.cColorBits = 24;
     pfd.cDepthBits = 24;
     pf = ChoosePixelFormat(hdc, &pfd);
-    if (!pf || !SetPixelFormat(hdc, pf, &pfd)) return 1;
+    if (!pf || !SetPixelFormat(hdc, pf, &pfd)) return 0;
     hrc = wglCreateContext(hdc);
-    if (!hrc || !wglMakeCurrent(hdc, hrc)) return 1;
-
+    if (!hrc || !wglMakeCurrent(hdc, hrc)) return 0;
     {
         PFNWGLSWAPINTERVALEXT swapInterval =
             (PFNWGLSWAPINTERVALEXT)(void *)wglGetProcAddress("wglSwapIntervalEXT");
         if (swapInterval) swapInterval(1);
     }
+    return 1;
+}
 
-    initGL();
-    {
-        RECT cr;
-        GetClientRect(hwnd, &cr);
-        winW = cr.right; winH = cr.bottom;
-    }
+static int createGLWindow(HINSTANCE hInst, LaunchMode mode)
+{
+    RECT cr;
+    registerWindowClass(hInst);
+    hwnd = createAppWindow(hInst, mode);
+    if (!hwnd) return 0;
+    if (!attachGLContext()) return 0;
+    GetClientRect(hwnd, &cr);
+    winW = cr.right; winH = cr.bottom;
+    return 1;
+}
 
-    if (fullscreen)
-        EnumDisplayMonitors(NULL, NULL, monitorEnum, 0);
-    if (nScenes == 0) {
-        scenes[0] = sceneCreate(0, 0, winW, winH);
-        if (!scenes[0]) return 1;
-        nScenes = 1;
-    }
-
-    if (shotMode) {
-        int i, j;
-        for (i = 0; i < shotSteps; i++) {
-            int anyRunning = 0;
-            for (j = 0; j < nScenes; j++) if (!scenes[j]->holding) anyRunning = 1;
-            if (!anyRunning) break;
-            tickAll();
-        }
-        drawAll();
-        glFinish();
-        saveBMP(shotFile, winW, winH);
-        SwapBuffers(hdc);
-        wglMakeCurrent(NULL, NULL);
-        wglDeleteContext(hrc);
-        ReleaseDC(hwnd, hdc);
+static void destroyGLWindow(void)
+{
+    wglMakeCurrent(NULL, NULL);
+    if (hrc) wglDeleteContext(hrc);
+    if (hwnd && IsWindow(hwnd)) {
+        if (hdc) ReleaseDC(hwnd, hdc);
         DestroyWindow(hwnd);
-        return 0;
     }
+    hrc = NULL;
+    hdc = NULL;
+    hwnd = NULL;
+}
+
+static int runShot(const LaunchOptions *options)
+{
+    int i, saved;
+    for (i = 0; i < options->shotSteps && anySceneRunning(); i++)
+        tickAll();
+    drawAll();
+    glFinish();
+    saved = saveBMP(options->shotFile, winW, winH);
+    SwapBuffers(hdc);
+    return saved ? 0 : 1;
+}
+
+static int runInteractive(void)
+{
+    LARGE_INTEGER freq, last, now;
+    double acc = 0.0;
+    MSG msg;
 
     GetCursorPos(&mouseStart);
     haveMouseStart = 1;
@@ -707,13 +811,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&last);
 
-    while (running) {
+    for (;;) {
         while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
-            if (msg.message == WM_QUIT) { running = 0; break; }
+            if (msg.message == WM_QUIT) return 0;
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
-        if (!running) break;
 
         QueryPerformanceCounter(&now);
         acc += (double)(now.QuadPart - last.QuadPart) * 1000.0 / (double)freq.QuadPart;
@@ -727,8 +830,35 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
         drawAll();
         SwapBuffers(hdc);
     }
+}
 
-    wglMakeCurrent(NULL, NULL);
-    wglDeleteContext(hrc);
-    return 0;
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
+{
+    LaunchOptions options;
+    int result;
+
+    (void)hPrev; (void)nShow;
+
+    parseCommandLine(cmdLine, &options);
+    if (options.mode == MODE_CONFIGURE) {
+        MessageBoxA(NULL, "3D Pipes has no options to configure.",
+                    WINDOW_TITLE, MB_OK | MB_ICONINFORMATION);
+        return 0;
+    }
+    if (options.mode == MODE_PREVIEW)
+        return 0;
+
+    fullscreen = options.mode == MODE_FULLSCREEN;
+    srand(options.hasShotSeed ? options.shotSeed
+                              : (unsigned)time(NULL) ^ (unsigned)GetCurrentProcessId());
+
+    if (!createGLWindow(hInst, options.mode)) return 1;
+    initGL();
+    if (!createScenes()) return 1;
+
+    result = options.mode == MODE_SHOT ? runShot(&options) : runInteractive();
+
+    destroyGLWindow();
+    destroyScenes();
+    return result;
 }
