@@ -7,6 +7,7 @@
 #define OUTPUT_DIR "test-output"
 #define PROGRAM_TIMEOUT_MS 60000
 #define WINDOW_TIMEOUT_MS 15000
+#define DIALOG_SETTLE_MS 500
 
 static int  testsPassed;
 static int  testsFailed;
@@ -804,6 +805,13 @@ static int windowShowsText(HWND h, const char *text)
     return search.found;
 }
 
+static void clickDialogButton(HWND dialog, int buttonId)
+{
+    HWND button = GetDlgItem(dialog, buttonId);
+    Sleep(DIALOG_SETTLE_MS);
+    PostMessage(dialog, WM_COMMAND, MAKEWPARAM(buttonId, BN_CLICKED), (LPARAM)button);
+}
+
 static void pressKey(HWND h, WPARAM key)
 {
     PostMessage(h, WM_KEYDOWN, key, 0);
@@ -983,7 +991,7 @@ static void the_configure_option_explains_that_there_is_nothing_to_set_up(void)
     expect(box != NULL, "a message box to appear");
     if (box) {
         expect(windowShowsText(box, "3D Pipes has no options to configure."), "the message to explain there are no options");
-        PostMessage(box, WM_COMMAND, IDOK, 0);
+        clickDialogButton(box, IDOK);
         expect(finishesWithin(&p, 10000, &code), "pressing OK to end the program");
         expectNumber("exit code", 0, code);
     }
