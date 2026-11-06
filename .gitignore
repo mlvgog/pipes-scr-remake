@@ -1,4 +1,3 @@
-# Build artifacts
 *.exe
 *.scr
 *.o
@@ -14,11 +13,9 @@
 *.gch
 *.d
 
-# Test renders from the /shot self-test mode
 *.bmp
 shot*.png
 
-# Editor / OS noise
 *.swp
 *~
 .vscode/
