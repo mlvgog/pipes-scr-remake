@@ -8,11 +8,13 @@ A faithful recreation of the classic Windows "3D Pipes" screensaver
 (`sspipes.scr`, Windows NT 4 – XP). The entire program is **one C file**,
 [pipes.c](pipes.c), using Win32 + fixed-function OpenGL 1.1 — deliberately the
 same technology as the original. Keep it that way: no build system beyond the
-one gcc command, no external libraries beyond `opengl32`/`gdi32`/`user32`, no
-C++ — unless the user explicitly asks otherwise.
+gcc command (plus a second one for the test suite), no external libraries
+beyond `opengl32`/`gdi32`/`user32`, no C++ — unless the user explicitly asks
+otherwise.
 
-The project was AI-generated (Anthropic Claude, model Claude Fable 5, via
-Claude Code) and the README discloses this; keep that notice intact.
+The project was AI-generated (Anthropic Claude via Claude Code: Claude Fable 5
+wrote the original program, Claude Opus 5.5 the later features) and the README
+discloses this; keep that notice intact.
 
 ## Build
 
@@ -24,12 +26,50 @@ or directly (MSYS2 ucrt64 gcc lives at `C:\msys64\ucrt64\bin\gcc.exe` on the
 dev machine; it is NOT on PATH in Claude's shell):
 
 ```
-gcc -O2 -Wall -o pipes.exe pipes.c -lopengl32 -lgdi32 -luser32 -mwindows
+gcc -O2 -Wall -Wextra -o pipes.exe pipes.c -lopengl32 -lgdi32 -luser32 -mwindows
 ```
 
-There are no tests. Treat `-Wall -Wextra` warnings as things to fix
-(exception: the `wglGetProcAddress` function-pointer cast warning is
-expected and silenced via an intermediate `(void *)` cast).
+Treat `-Wall -Wextra` warnings as errors (the test build uses `-Werror`).
+The `wglGetProcAddress` function-pointer cast warning is silenced via an
+intermediate `(void *)` cast.
+
+## Tests
+
+```powershell
+.\build.ps1 -Test
+```
+
+builds `pipes.exe` and `test_pipes.exe` with `-Werror` and runs the suite.
+`tests/test_pipes.c` does `#define WinMain pipesProgramEntry` and then
+`#include "../pipes.c"`, so every `static` function in pipes.c is directly
+callable from the tests while pipes.c stays a single file. The suite has two
+kinds of test:
+
+- **In-process**: argument parsing, the simulation (stepping pipes in
+  hand-built scenes), monitor-to-viewport mapping, and a real OpenGL render
+  through `createGLWindow` + `saveBMP`.
+- **Whole program**: it launches `pipes.exe` (path = first argument, default
+  `pipes.exe`) and drives it with window messages: `/shot` output, windowed
+  and `/s` input handling, `/c`, `/p`. Renders land in `test-output/`.
+
+Tests are functions whose names are sentences (`a_pipe_never_moves_into_a_node_that_is_already_taken`);
+the runner prints them with spaces as `PASS`/`FAIL` lines, followed by
+plain-English expected/actual notes. Every behaviour change needs a test in
+the same PR, and the whole suite must pass.
+
+CI (`.github/workflows/tests.yml`) runs `build.ps1 -Test` on `windows-latest`
+for every pull request and push to main, and keeps `test-output/` as an
+artifact.
+
+In a Linux cloud session, cross-compile and run under Wine instead:
+
+```
+x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -o pipes.exe pipes.c -lopengl32 -lgdi32 -luser32 -mwindows
+x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -o test_pipes.exe tests/test_pipes.c -lopengl32 -lgdi32 -luser32
+WINEDEBUG=-all xvfb-run -a -s "-screen 0 1920x1080x24" wine test_pipes.exe
+```
+
+(packages: `mingw-w64 wine64 xvfb mesa-utils libgl1-mesa-dri imagemagick`).
 
 ## Verifying changes (important)
 
@@ -37,18 +77,21 @@ Never claim a visual change works without looking at output. The program has
 a built-in self-test mode for exactly this:
 
 ```
-pipes.exe /shot out.bmp [steps]
+pipes.exe /shot out.bmp [steps] [seed]
 ```
 
 simulates N growth steps (default 700; ~140 gives a pleasing mid-stage
-scene), renders one frame, writes a BMP, and exits. Workflow from PowerShell:
+scene), renders one frame, writes a BMP, and exits with code 0 (1 if the BMP
+could not be written). A seed makes the picture reproducible byte for byte.
+The shot window is a borderless 1280×720 popup at the screen origin, so its
+size does not depend on the desktop size.
+
+`pipes.exe` is a GUI app (`-mwindows`), so PowerShell does not wait for it;
+use `Start-Process -Wait`, then convert the BMP to PNG so the Read tool can
+display it (on Linux: `convert out.bmp out.png`):
 
 ```powershell
-# pipes.exe is a GUI app (-mwindows): PowerShell does NOT wait for it.
-# Always use Start-Process -Wait.
 $p = Start-Process -FilePath .\pipes.exe -ArgumentList '/shot','out.bmp','140' -PassThru -Wait
-
-# Convert BMP -> PNG so the Read tool can display it
 Add-Type -AssemblyName System.Drawing
 $b = [System.Drawing.Bitmap]::FromFile("$PWD\out.bmp")
 $b.Save("$PWD\out.png", [System.Drawing.Imaging.ImageFormat]::Png)
@@ -97,10 +140,14 @@ file-scope statics; no dynamic allocation except one `calloc` per `Scene`.
 - **Rendering** (`sceneDraw`, `drawAll`) — three display lists built once
   (cylinder, sphere, quarter-torus elbow); per frame: one clear, then each
   scene sets its own viewport + frustum and replays its prim list.
-- **Win32 plumbing** — window/context creation, the screensaver argument
-  contract (`/s`, `/c`, `/p`, plus the custom `/shot`), input-to-exit logic,
-  fixed-timestep main loop (accumulator over `QueryPerformanceCounter`,
-  vsync via `wglSwapIntervalEXT` when available).
+- **Win32 plumbing** — `parseCommandLine` turns the screensaver argument
+  contract (`/s`, `/c`, `/p`, plus the custom `/shot`) into a
+  `LaunchOptions`; `createGLWindow`/`destroyGLWindow` own the window and
+  context; `createScenes`/`destroyScenes` own the scenes; `runShot` and
+  `runInteractive` are the two main loops (the latter a fixed-timestep
+  accumulator over `QueryPerformanceCounter`, vsync via `wglSwapIntervalEXT`
+  when available); `wndProc` holds the input-to-exit logic. `WinMain` only
+  wires these together.
 
 ### Geometry conventions (read before touching joint/drawing math)
 
@@ -154,10 +201,15 @@ file-scope statics; no dynamic allocation except one `calloc` per `Scene`.
   emails, or `C:\Users\<name>` paths in any committed file **or commit
   message**. Before pushing, scan history if in doubt
   (`git grep -iE '<patterns>' $(git rev-list --all)`).
+- Every change goes on its own feature branch (`feature/<name>`, cut from
+  the latest `main`) and reaches `main` only by merging its pull request,
+  after review and with the CI test run green. Never push to `main`
+  directly. Merge with rebase so the individual commits (the design log)
+  survive.
 - Commit style: imperative subject; a detailed body explaining what, why,
   the design decisions, and how it was verified — the history doubles as the
-  project's design log. End with
-  `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
+  project's design log. End with a `Co-Authored-By:` trailer naming the
+  Claude model that did the work (`Claude <Model> <noreply@anthropic.com>`).
 - Build artifacts (`*.exe`, `*.scr`, test BMP/PNGs) are gitignored;
   `preview.png` is the one committed image. If a change alters the look,
   regenerate `preview.png` from a ~140-step `/shot` render and mention it in

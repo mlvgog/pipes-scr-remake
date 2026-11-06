@@ -12,6 +12,8 @@ Win32 and fixed-function OpenGL 1.1 — the same technology as the original.
 > "replicate the look and feel of the old Windows pipes screensaver".
 > The visual output was verified against the original by rendering test
 > frames, but the code has not been line-by-line reviewed by a human.
+> Later work (the test suite and the features added after the first
+> release) was done by **Claude Opus 5.5**, also in Claude Code.
 
 ## What it replicates
 
@@ -44,7 +46,7 @@ No libraries beyond what ships with Windows (`opengl32`, `gdi32`, `user32`).
 or directly:
 
 ```
-gcc -O2 -o pipes.exe pipes.c -lopengl32 -lgdi32 -luser32 -mwindows
+gcc -O2 -Wall -Wextra -o pipes.exe pipes.c -lopengl32 -lgdi32 -luser32 -mwindows
 ```
 
 MSVC works too: `cl /O2 pipes.c /link opengl32.lib gdi32.lib user32.lib /subsystem:windows`
@@ -56,7 +58,29 @@ MSVC works too: `cl /O2 pipes.c /link opengl32.lib gdi32.lib user32.lib /subsyst
 | `pipes.exe` | Windowed (1280x720), Esc to quit |
 | `pipes.exe /s` | Fullscreen on all monitors — any key, click, or mouse movement exits |
 | `pipes.exe /c` | Screensaver "configure" stub |
-| `pipes.exe /shot out.bmp [steps]` | Simulate N growth steps, render one frame to a BMP, exit (used for visual testing) |
+| `pipes.exe /shot out.bmp [steps] [seed]` | Simulate N growth steps, render one 1280x720 frame to a BMP, exit (used for visual testing; a seed makes the picture reproducible) |
+
+## Tests
+
+```powershell
+.\build.ps1 -Test
+```
+
+builds the program and the test suite (`tests/test_pipes.c`) with warnings
+treated as errors, then runs every test. The suite checks the command line,
+how pipes grow and join, the scene lifecycle, multi-monitor layout and
+screenshots, and it launches `pipes.exe` itself to check the windowed
+viewer, the fullscreen screensaver, `/c` and `/p`. Each test prints as a plain
+sentence:
+
+```
+Growing pipes
+  PASS  a pipe never moves into a node that is already taken
+  PASS  pipes never leave the grid
+```
+
+Rendered pictures are kept in `test-output/`. The same suite runs on GitHub
+Actions (Windows) for every pull request.
 
 ## Install as an actual screensaver (.scr)
 

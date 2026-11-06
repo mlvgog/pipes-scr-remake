@@ -1,0 +1,31 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          release: false
+          update: false
+          install: mingw-w64-ucrt-x86_64-gcc
+
+      - name: Build and run the test suite
+        shell: pwsh
+        run: ./build.ps1 -Test
+
+      - name: Keep the rendered pictures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-renders
+          path: test-output/
+          if-no-files-found: ignore
