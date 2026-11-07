@@ -22,18 +22,38 @@ merged with **rebase**.
 | 2 | `feature/original-scene-rules`: the original's simulation | **merged** ([#2](https://github.com/mlvgog/pipes-scr-remake/pull/2)) |
 | 3 | `feature/original-look`: camera, proportions, materials, lighting, speed | **merged** ([#3](https://github.com/mlvgog/pipes-scr-remake/pull/3)) |
 | 4 | `feature/preview-pane`: `/p <hwnd>` | **merged** ([#4](https://github.com/mlvgog/pipes-scr-remake/pull/4)) |
-| 5 | `feature/settings-dialog`: XP "3D Pipes Setup" dialog + registry | **in review** |
-| 6 | `feature/textured-pipes`: Solid/Textured + "Choose Texture..." | to do |
+| 5 | `feature/settings-dialog`: XP "3D Pipes Setup" dialog + registry | **merged** ([#5](https://github.com/mlvgog/pipes-scr-remake/pull/5)) |
+| 6 | `feature/textured-pipes`: Solid/Textured + "Choose Texture..." | **in progress** |
 | 7 | `feature/teapot`: Utah teapot easter egg | to do |
 | 8 | `feature/release`: a really good first release | to do |
 
 ## Next step
 
-PR 5 (`feature/settings-dialog`) is implemented: 100 tests pass under Wine.
-Next: open its PR, then CI, review and rebase-merge. Then cut
-`feature/textured-pipes` from `main`. Add a Surface Style group
-(Solid/Textured + "Choose Texture...") to `buildSettingsDialog` and the
-`Settings` struct, with registry values `SurfaceStyle` and `TexturePath`.
+Implement PR 6 on `feature/textured-pipes`. Design decisions so far:
+
+- **Settings:** a `SurfaceStyle` DWORD and a `TexturePath` REG_SZ. The
+  dialog gets a Surface Style group (Solid / Textured) and a "Choose
+  Texture..." button (comdlg32 `GetOpenFileNameA`), enabled only when
+  Textured is picked.
+- **Built-in texture:** a light, subtle diagonal stripe generated in code,
+  tinted by each pipe's normal bright material (the owner remembers
+  textured mode as "bright coloured pipes").
+- **Custom `.bmp`:** tinted by the original's four near-white texture
+  materials, so the picture keeps its own colours. Flag this split to the
+  owner.
+- **Mapping:** done through the texture matrix per prim.
+  - s runs along a piece at `texRep/CELL` per unit; a piece starting one
+    radius past a node begins at `2R/CELL·texRep`; an elbow covers 0 to
+    `2R/CELL·texRep`.
+  - t runs around from the seam ("notch"). Start notches by new direction:
+    +x→+y, −x→+y, +y→−z, −y→+z, +z→+y, −z→+y. At each turn the notch turns
+    +90° about `old × new`.
+  - Cylinder lists have t increasing anticlockwise about travel. Elbow
+    rings run the other way, so their t scale is negative.
+  - `texRep = max(1, (int)(viewportHeight/800 + 0.5))`.
+- **Look and rules:** GL_MODULATE, GL_REPEAT, GL_NEAREST, global ambient
+  0.6, budget 3 (Multiple 4). Textured ball joints and caps use
+  latitude/longitude spheres (simpler than the original's swept patch).
 
 Housekeeping: the git proxy in cloud sessions refuses to delete remote
 branches, so the merged `feature/test-suite` and
@@ -267,4 +287,6 @@ client area. It ignores input-to-exit and quits when the parent goes away.
     - The `.scr` test copy is cleaned up.
   - Skipped: folding the globals into one `Settings` (refactor only).
   - 102 tests pass.
+- **2026-11-07:** CI green on #5 (102 tests on Windows); merged by rebase.
+  Started `feature/textured-pipes`.
 
