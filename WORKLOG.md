@@ -20,8 +20,8 @@ merged with **rebase**.
 |---|---|---|
 | 1 | `feature/test-suite`: test suite, Windows CI, testable `pipes.c` | **merged** ([#1](https://github.com/mlvgog/pipes-scr-remake/pull/1)) |
 | 2 | `feature/original-scene-rules`: the original's simulation | **merged** ([#2](https://github.com/mlvgog/pipes-scr-remake/pull/2)) |
-| 3 | `feature/original-look`: camera, proportions, materials, lighting, speed | **in progress** |
-| 4 | `feature/preview-pane`: `/p <hwnd>` | **implemented**, stacked on PR 3 |
+| 3 | `feature/original-look`: camera, proportions, materials, lighting, speed | **merged** ([#3](https://github.com/mlvgog/pipes-scr-remake/pull/3)) |
+| 4 | `feature/preview-pane`: `/p <hwnd>` | **in review** |
 | 5 | `feature/settings-dialog`: XP "3D Pipes Setup" dialog + registry | to do |
 | 6 | `feature/textured-pipes`: Solid/Textured + "Choose Texture..." | to do |
 | 7 | `feature/teapot`: Utah teapot easter egg | to do |
@@ -29,10 +29,10 @@ merged with **rebase**.
 
 ## Next step
 
-PR 3 (`feature/original-look`) is implemented: 76 tests pass under Wine,
-and the renders look like the XP saver. Next: commit, push, open the PR,
-send the owner renders, then CI, review and rebase-merge. After that, cut
-`feature/preview-pane` from the new `main`.
+PR 4 (`feature/preview-pane`) is rebased onto `main` and its PR is open.
+Next: CI, review, rebase-merge. Then cut `feature/settings-dialog` from
+`main` (the spec is below, and two items are carried over from PR 3: regenerate
+preview.png from a plain `/shot`, and keep the slider's side counts even).
 
 Housekeeping: the git proxy in cloud sessions refuses to delete remote
 branches, so the merged `feature/test-suite` and
@@ -227,3 +227,5 @@ client area. It ignores input-to-exit and quits when the parent goes away.
     cross-process child creation sends messages to the parent's thread.
   - The branch is stacked on `feature/original-look`. Rebase onto `main`
     once #3 merges, then open its PR.
+- **2026-11-07:** CI green on #3 (77 tests on Windows); merged by rebase.
+  Rebased PR 4 onto `main`.
