@@ -46,7 +46,7 @@
 #define GLOBAL_AMBIENT  1.0f
 #define LIGHT_AMBIENT   0.1f
 
-#define MAX_PRIMS   60000
+#define MAX_PRIMS   (4 * MAXX * MAXY * MAXZ)
 #define MAX_SCENES  8
 
 #define DEFAULT_SHOT_STEPS 700

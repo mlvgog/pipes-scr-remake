@@ -990,14 +990,14 @@ static void nodes_are_seven_units_apart_and_centred_on_the_origin(void)
     free(s);
 }
 
-static void the_camera_sees_ninety_degrees_from_seventy_five_units_away(void)
+static void the_far_plane_reaches_past_the_whole_grid(void)
 {
     Scene *s = emptyScene();
-    expectNear("vertical field of view in degrees", 90.0, FOV_Y);
-    expectNear("distance from the eye to the centre of the grid", 75.0, EYE_DISTANCE);
     expectNear("far plane on a 16:9 screen", 75.0 + 2.0 * 16 * 7, farPlane(s));
-    expect(EYE_DISTANCE - 7.0 * 7 - ballRadius() > NEAR_PLANE,
-           "the nearest layer of pipes to be in front of the near plane");
+    expect(EYE_DISTANCE - sqrt(2.0) * 7.0 * 7 - ballRadius() > NEAR_PLANE,
+           "the nearest corner of the grid to stay in front of the near plane however the scene is turned");
+    expect(EYE_DISTANCE + sqrt(2.0) * 7.0 * 7 + ballRadius() < farPlane(s),
+           "the farthest corner of the grid to stay in front of the far plane however the scene is turned");
     free(s);
 }
 
@@ -1280,6 +1280,21 @@ static double litShareWithSquaresEaten(Scene *s, int eaten)
     drawDissolve(s, eaten);
     glFinish();
     return litShareOfFrame(winW, winH);
+}
+
+static void scenes_are_drawn_through_a_ninety_degree_lens_from_seventy_five_units_away(void)
+{
+    double projection[16], modelview[16];
+    if (!openTestPicture(1280, 720)) return;
+    createScenes();
+    sceneDraw(scenes[0]);
+    glGetDoublev(GL_PROJECTION_MATRIX, projection);
+    glGetDoublev(GL_MODELVIEW_MATRIX, modelview);
+    closeTestPicture();
+    expectNear("vertical lens factor (1 means a 90 degree field of view)", 1.0, projection[5]);
+    expectNear("horizontal lens factor on a 16:9 screen", 720.0 / 1280.0, projection[0]);
+    expectNear("distance from the eye to the centre of the grid", -75.0, modelview[14]);
+    expectNear("sideways shift of the camera", 0.0, modelview[12]);
 }
 
 static void a_screenshot_of_an_odd_sized_window_is_a_valid_bitmap(void)
@@ -1737,7 +1752,8 @@ int main(int argc, char **argv)
 
     heading("The original's look");
     run(nodes_are_seven_units_apart_and_centred_on_the_origin);
-    run(the_camera_sees_ninety_degrees_from_seventy_five_units_away);
+    run(the_far_plane_reaches_past_the_whole_grid);
+    run(scenes_are_drawn_through_a_ninety_degree_lens_from_seventy_five_units_away);
     run(balls_and_caps_are_just_big_enough_to_hide_the_pipe_corners);
     run(elbows_meet_the_pipe_ends_exactly_for_every_kind_of_turn);
     run(every_pipe_gets_one_of_the_sixteen_classic_materials);
