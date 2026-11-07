@@ -28,6 +28,7 @@
 #define SCENE_TURN_DEGREES      9.73156f
 
 #define DISSOLVE_MS                         1700
+#define DISSOLVE_FRAME_MS                   16
 #define DISSOLVE_SQUARES_ACROSS_SHORT_SIDE  32
 #define MAX_DISSOLVE_SQUARES                16384
 
@@ -685,6 +686,20 @@ static void tickAll(void)
     for (i = 0; i < nScenes; i++) sceneTick(scenes[i]);
 }
 
+static int anySceneDissolving(void)
+{
+    int i;
+    for (i = 0; i < nScenes; i++) if (scenes[i]->phase == SCENE_DISSOLVING) return 1;
+    return 0;
+}
+
+static DWORD restBeforeNextFrame(double msSinceLastStep, int dissolving)
+{
+    double rest = STEP_MS - msSinceLastStep;
+    if (dissolving && rest > DISSOLVE_FRAME_MS) rest = DISSOLVE_FRAME_MS;
+    return rest < 1.0 ? 0 : (DWORD)rest;
+}
+
 static int anySceneRunning(void)
 {
     int i;
@@ -1212,6 +1227,10 @@ static int runInteractive(void)
 
         drawAll();
         SwapBuffers(hdc);
+        {
+            DWORD rest = restBeforeNextFrame(acc, anySceneDissolving());
+            if (rest) MsgWaitForMultipleObjects(0, NULL, FALSE, rest, QS_ALLINPUT);
+        }
     }
 }
 
@@ -1240,7 +1259,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
 
     if (!createGLWindow(hInst, options.mode)) {
         destroyGLWindow();
-        return 1;
+        return previewing ? 0 : 1;
     }
     initGL();
     if (!createScenes()) {

@@ -229,3 +229,13 @@ client area. It ignores input-to-exit and quits when the parent goes away.
     once #3 merges, then open its PR.
 - **2026-11-07:** CI green on #3 (77 tests on Windows); merged by rebase.
   Rebased PR 4 onto `main`.
+- **2026-11-07, PR 4 review:**
+  - The main loop now rests until the next step (16 ms frames while
+    dissolving) instead of redrawing flat out, which spun a core wherever
+    vsync is unavailable.
+  - A preview whose window vanishes during start-up exits with 0.
+  - Preview tests check that their parent window exists.
+  - 84 tests pass.
+  - Note for local mutation runs: don't call `winepath` inside the
+    `xvfb-run` command line. It starts a display-less wineserver that the
+    test run then joins, and every window fails.
