@@ -207,3 +207,14 @@ client area. It ignores input-to-exit and quits when the parent goes away.
     - 33 ms steps; resize starts a fresh scene.
   - preview.png is a 140-step render with Multiple + Mixed switched on.
   - 76 tests pass.
+  - Opened #3 and sent the owner renders (also in the gitignored
+    `renders/` folder).
+  - Review fixes:
+    - MAX_PRIMS is now sized from the 15³ grid (~7× less memory per scene).
+    - The camera test reads the real projection and modelview matrices
+      after `sceneDraw`.
+    - The far plane is checked to cover the turned grid.
+  - Left for PR 5:
+    - Regenerate preview.png from a plain `/shot` once settings are saved.
+    - The resolution slider must keep the side count even (8/12/16/20) so
+      cylinder and elbow facets line up; add a test for that.
