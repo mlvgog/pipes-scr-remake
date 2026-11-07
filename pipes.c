@@ -128,6 +128,7 @@ typedef struct {
     int        shotSteps;
     int        hasShotSeed;
     unsigned   shotSeed;
+    HWND       previewParent;
 } LaunchOptions;
 
 static const int DV[6][3] = {
@@ -141,6 +142,8 @@ static GLuint dlCyl, dlSph, dlElb;
 static int    winW = WINDOWED_WIDTH, winH = WINDOWED_HEIGHT;
 static int    vsX, vsY;
 static int    fullscreen;
+static int    previewing;
+static HWND   previewParent;
 static HWND   hwnd;
 static HDC    hdc;
 static HGLRC  hrc;
@@ -1022,7 +1025,10 @@ static void parseCommandLine(const char *cmdLine, LaunchOptions *out)
     } else if (switchIs(a, "/c")) {
         out->mode = MODE_CONFIGURE;
     } else if (switchIs(a, "/p")) {
+        char word[32];
         out->mode = MODE_PREVIEW;
+        readWord(*(a + 2) == ':' ? a + 3 : a + 2, word, sizeof word);
+        out->previewParent = (HWND)(UINT_PTR)_strtoui64(word, NULL, 10);
     }
 }
 
@@ -1037,6 +1043,7 @@ static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         if (!fullscreen && nScenes == 1) sceneResize(scenes[0], winW, winH);
         return 0;
     case WM_KEYDOWN:
+        if (previewing) return 0;
         if (fullscreen || wp == VK_ESCAPE) DestroyWindow(h);
         return 0;
     case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN:
@@ -1087,6 +1094,15 @@ static HWND createAppWindow(HINSTANCE hInst, LaunchMode mode)
         return CreateWindowEx(WS_EX_TOPMOST, WINDOW_CLASS, WINDOW_TITLE,
                               WS_POPUP | WS_VISIBLE, vsX, vsY, winW, winH,
                               NULL, NULL, hInst, NULL);
+    }
+    if (mode == MODE_PREVIEW) {
+        RECT parentArea;
+        GetClientRect(previewParent, &parentArea);
+        winW = parentArea.right;
+        winH = parentArea.bottom;
+        return CreateWindowEx(0, WINDOW_CLASS, WINDOW_TITLE,
+                              WS_CHILD | WS_VISIBLE | WS_DISABLED, 0, 0, winW, winH,
+                              previewParent, NULL, hInst, NULL);
     }
     if (mode == MODE_SHOT) {
         return CreateWindowEx(WS_EX_TOOLWINDOW, WINDOW_CLASS, WINDOW_TITLE,
@@ -1212,8 +1228,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
                     WINDOW_TITLE, MB_OK | MB_ICONINFORMATION);
         return 0;
     }
-    if (options.mode == MODE_PREVIEW)
-        return 0;
+    if (options.mode == MODE_PREVIEW) {
+        if (!options.previewParent || !IsWindow(options.previewParent)) return 0;
+        previewing = 1;
+        previewParent = options.previewParent;
+    }
 
     fullscreen = options.mode == MODE_FULLSCREEN;
     srand(options.hasShotSeed ? options.shotSeed

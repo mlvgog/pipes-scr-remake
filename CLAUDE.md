@@ -170,7 +170,11 @@ file-scope statics; no dynamic allocation except one `calloc` per `Scene`.
   `runInteractive` are the two main loops (the latter a fixed-timestep
   accumulator over `QueryPerformanceCounter`, vsync via `wglSwapIntervalEXT`
   when available); `wndProc` holds the input-to-exit logic. `WinMain` only
-  wires these together.
+  wires these together. `/p <hwnd>` (and `/p:<hwnd>`) sets `previewing`
+  and creates the window as a disabled `WS_CHILD` filling the given
+  window's client area, so clicks reach the settings dialog; it ignores
+  input and ends when the parent destroys it (`WM_DESTROY`). A handle that
+  is missing or not a window exits at once with code 0.
 
 ### Geometry conventions (read before touching joint/drawing math)
 
@@ -274,5 +278,4 @@ file-scope statics; no dynamic allocation except one `calloc` per `Scene`.
 - Teapot easter egg (needs Utah teapot Bezier patch data — do not hand-type
   it from memory; fetch real data).
 - Configuration dialog (`/c` is a stub; options are compile-time constants).
-- `/p <hwnd>` preview-pane rendering (currently exits cleanly).
 - Textured pipes (the original's optional surface mode).

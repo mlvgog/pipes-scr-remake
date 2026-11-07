@@ -41,6 +41,8 @@ Win32 and fixed-function OpenGL 1.1 — the same technology as the original.
   **small black squares in random order** (the original's "digital
   dissolve"), and the next scene is viewed from a little further round
   (9.73° per scene).
+- **Preview pane**: the little live preview in Windows' screen saver
+  settings shows the pipes too (`/p <hwnd>`).
 - **Multi-monitor**: fullscreen mode covers the entire virtual desktop and
   runs an independent pipes scene on every monitor (an improvement over the
   original, which left secondary monitors showing the desktop). Input on
@@ -70,6 +72,7 @@ MSVC works too: `cl /O2 pipes.c /link opengl32.lib gdi32.lib user32.lib /subsyst
 | `pipes.exe` | Windowed (1280x720), Esc to quit |
 | `pipes.exe /s` | Fullscreen on all monitors — any key, click, or mouse movement exits |
 | `pipes.exe /c` | Screensaver "configure" stub |
+| `pipes.exe /p <hwnd>` | Draws the little live preview inside Windows' screen saver settings (the window it is given) and ends when that window closes |
 | `pipes.exe /shot out.bmp [steps] [seed]` | Simulate N growth steps, render one 1280x720 frame to a BMP, exit (used for visual testing; a seed makes the picture reproducible) |
 
 ## Tests
@@ -122,8 +125,6 @@ implemented:
   (solid/textured), speed and resolution. Here those are compile-time
   settings in `pipes.c` (`multiplePipes`, `jointStyleSetting`, `STEP_MS`,
   …) and `/c` just shows a message box.
-- **Preview pane mode** — `/p <hwnd>` (the little preview inside the
-  screensaver settings dialog) exits cleanly instead of rendering.
 - **Textured pipes** — the original's optional marble/texture surface mode.
 
 ## Tuning

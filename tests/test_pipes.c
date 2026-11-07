@@ -152,9 +152,12 @@ static void slash_c_asks_for_the_configuration_screen(void)
     expectNumber("mode for /c:1234", MODE_CONFIGURE, parsed("/c:1234").mode);
 }
 
-static void slash_p_asks_for_the_preview_pane(void)
+static void slash_p_asks_for_the_preview_pane_inside_the_given_window(void)
 {
     expectNumber("mode for /p 1234", MODE_PREVIEW, parsed("/p 1234").mode);
+    expectNumber("window handle from /p 1234", 1234, (long long)(UINT_PTR)parsed("/p 1234").previewParent);
+    expectNumber("window handle from /p:5678", 5678, (long long)(UINT_PTR)parsed("/p:5678").previewParent);
+    expectNumber("window handle from a bare /p", 0, (long long)(UINT_PTR)parsed("/p").previewParent);
 }
 
 typedef struct {
@@ -1297,6 +1300,24 @@ static void scenes_are_drawn_through_a_ninety_degree_lens_from_seventy_five_unit
     expectNear("sideways shift of the camera", 0.0, modelview[12]);
 }
 
+static void a_preview_sized_picture_still_shows_plenty_of_pipes(void)
+{
+    SavedSettings saved = useSettings(1, JOINT_MIXED);
+    int i;
+    double lit;
+    srand(17);
+    if (!openTestPicture(152, 112)) { restoreSettings(saved); return; }
+    createScenes();
+    for (i = 0; i < 140; i++) tickAll();
+    drawAll();
+    glFinish();
+    saveBMP(OUTPUT_DIR "\\preview-size.bmp", winW, winH);
+    lit = litShareOfFrame(winW, winH);
+    closeTestPicture();
+    expectBetween("share of a 152x112 preview covered by pipes", 0.10, 0.95, lit);
+    restoreSettings(saved);
+}
+
 static void a_screenshot_of_an_odd_sized_window_is_a_valid_bitmap(void)
 {
     const char *path = OUTPUT_DIR "\\odd-size.bmp";
@@ -1664,9 +1685,150 @@ static void the_configure_option_explains_that_there_is_nothing_to_set_up(void)
     stopPipes(&p);
 }
 
-static void the_preview_option_exits_straight_away(void)
+static void pumpMessagesFor(DWORD ms)
 {
-    Program p = startPipes("/p 12345");
+    DWORD start = GetTickCount();
+    MSG m;
+    do {
+        while (PeekMessage(&m, NULL, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&m);
+            DispatchMessage(&m);
+        }
+        Sleep(10);
+    } while (GetTickCount() - start < ms);
+}
+
+static int finishesWhilePumpingMessages(Program *p, DWORD ms, DWORD *exitCode)
+{
+    DWORD start = GetTickCount();
+    while (GetTickCount() - start < ms) {
+        if (WaitForSingleObject(p->info.hProcess, 0) == WAIT_OBJECT_0) {
+            if (exitCode) GetExitCodeProcess(p->info.hProcess, exitCode);
+            return 1;
+        }
+        pumpMessagesFor(20);
+    }
+    return 0;
+}
+
+static HWND openSettingsLikeWindow(int clientWidth, int clientHeight)
+{
+    WNDCLASSA wc;
+    RECT r;
+    memset(&wc, 0, sizeof wc);
+    wc.lpfnWndProc = DefWindowProcA;
+    wc.hInstance = GetModuleHandle(NULL);
+    wc.hbrBackground = (HBRUSH)GetStockObject(GRAY_BRUSH);
+    wc.lpszClassName = "PipesTestPreviewParent";
+    RegisterClassA(&wc);
+    r.left = 0; r.top = 0; r.right = clientWidth; r.bottom = clientHeight;
+    AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+    return CreateWindowA(wc.lpszClassName, "Screen Saver Settings (test)", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                         100, 100, r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
+}
+
+typedef struct {
+    HWND found;
+} ChildSearch;
+
+static BOOL CALLBACK matchPipesChild(HWND h, LPARAM lp)
+{
+    char className[64];
+    GetClassNameA(h, className, sizeof className);
+    if (strcmp(className, WINDOW_CLASS) != 0) return TRUE;
+    ((ChildSearch *)lp)->found = h;
+    return FALSE;
+}
+
+static HWND waitForPreviewInside(HWND parent, Program *p)
+{
+    DWORD start = GetTickCount();
+    ChildSearch search;
+    while (GetTickCount() - start < WINDOW_TIMEOUT_MS) {
+        search.found = NULL;
+        EnumChildWindows(parent, matchPipesChild, (LPARAM)&search);
+        if (search.found) return search.found;
+        if (WaitForSingleObject(p->info.hProcess, 0) == WAIT_OBJECT_0) return NULL;
+        pumpMessagesFor(50);
+    }
+    return NULL;
+}
+
+static Program startPreviewIn(HWND parent)
+{
+    char arguments[64];
+    snprintf(arguments, sizeof arguments, "/p %llu", (unsigned long long)(UINT_PTR)parent);
+    return startPipes(arguments);
+}
+
+static void the_preview_pane_fills_the_little_window_it_is_given(void)
+{
+    HWND parent = openSettingsLikeWindow(152, 112);
+    Program p = startPreviewIn(parent);
+    HWND preview = waitForPreviewInside(parent, &p);
+    RECT area;
+    expect(preview != NULL, "a pipes window to appear inside the given window");
+    if (preview) {
+        GetClientRect(preview, &area);
+        expectNumber("preview width", 152, area.right);
+        expectNumber("preview height", 112, area.bottom);
+        expect(GetWindowLong(preview, GWL_STYLE) & WS_CHILD, "the preview to be a child of the given window");
+        pumpMessagesFor(1000);
+        expect(WaitForSingleObject(p.info.hProcess, 0) == WAIT_TIMEOUT, "the preview to keep running");
+    }
+    stopPipes(&p);
+    DestroyWindow(parent);
+}
+
+static void the_preview_pane_ignores_keys_and_clicks(void)
+{
+    HWND parent = openSettingsLikeWindow(152, 112);
+    Program p = startPreviewIn(parent);
+    HWND preview = waitForPreviewInside(parent, &p);
+    expect(preview != NULL, "a pipes window to appear inside the given window");
+    if (preview) {
+        PostMessage(preview, WM_KEYDOWN, VK_ESCAPE, 0);
+        PostMessage(preview, WM_KEYDOWN, 'A', 0);
+        PostMessage(preview, WM_LBUTTONDOWN, 0, 0);
+        PostMessage(preview, WM_MOUSEMOVE, 0, MAKELPARAM(100, 100));
+        pumpMessagesFor(1000);
+        expect(WaitForSingleObject(p.info.hProcess, 0) == WAIT_TIMEOUT,
+               "the preview to keep running after Escape, a key, a click and a mouse move");
+    }
+    stopPipes(&p);
+    DestroyWindow(parent);
+}
+
+static void the_preview_pane_closes_when_its_window_closes(void)
+{
+    HWND parent = openSettingsLikeWindow(152, 112);
+    Program p = startPreviewIn(parent);
+    HWND preview = waitForPreviewInside(parent, &p);
+    DWORD code = 1;
+    expect(preview != NULL, "a pipes window to appear inside the given window");
+    if (preview) {
+        pumpMessagesFor(500);
+        DestroyWindow(parent);
+        parent = NULL;
+        expect(finishesWhilePumpingMessages(&p, 10000, &code), "the preview to end when its window closes");
+        expectNumber("exit code", 0, code);
+    }
+    stopPipes(&p);
+    if (parent) DestroyWindow(parent);
+}
+
+static void a_preview_for_a_window_that_does_not_exist_exits_straight_away(void)
+{
+    Program p = startPipes("/p 1");
+    DWORD code = 1;
+    expect(finishesWithin(&p, 10000, &code), "the program to end by itself");
+    expectNumber("exit code", 0, code);
+    stopPipes(&p);
+}
+
+static void a_preview_without_a_window_handle_exits_straight_away(void)
+{
+    Program p = startPipes("/p");
     DWORD code = 1;
     expect(finishesWithin(&p, 10000, &code), "the program to end by itself");
     expectNumber("exit code", 0, code);
@@ -1689,7 +1851,7 @@ int main(int argc, char **argv)
     run(slash_shot_uses_sensible_defaults_when_details_are_missing);
     run(unknown_or_run_together_switches_open_the_windowed_viewer);
     run(slash_c_asks_for_the_configuration_screen);
-    run(slash_p_asks_for_the_preview_pane);
+    run(slash_p_asks_for_the_preview_pane_inside_the_given_window);
 
     heading("Growing pipes");
     run(a_new_scene_starts_its_pipe_with_a_cap_and_a_first_stretch_of_pipe);
@@ -1776,7 +1938,14 @@ int main(int argc, char **argv)
     run(the_screensaver_closes_when_a_mouse_button_is_pressed);
     run(the_screensaver_ignores_a_tiny_mouse_twitch_but_closes_on_a_real_move);
     run(the_configure_option_explains_that_there_is_nothing_to_set_up);
-    run(the_preview_option_exits_straight_away);
+
+    heading("Preview pane");
+    run(a_preview_sized_picture_still_shows_plenty_of_pipes);
+    run(the_preview_pane_fills_the_little_window_it_is_given);
+    run(the_preview_pane_ignores_keys_and_clicks);
+    run(the_preview_pane_closes_when_its_window_closes);
+    run(a_preview_for_a_window_that_does_not_exist_exits_straight_away);
+    run(a_preview_without_a_window_handle_exits_straight_away);
 
     printf("\n%d passed, %d failed\n", testsPassed, testsFailed);
     return testsFailed == 0 ? 0 : 1;

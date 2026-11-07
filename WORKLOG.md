@@ -21,7 +21,7 @@ merged with **rebase**.
 | 1 | `feature/test-suite`: test suite, Windows CI, testable `pipes.c` | **merged** ([#1](https://github.com/mlvgog/pipes-scr-remake/pull/1)) |
 | 2 | `feature/original-scene-rules`: the original's simulation | **merged** ([#2](https://github.com/mlvgog/pipes-scr-remake/pull/2)) |
 | 3 | `feature/original-look`: camera, proportions, materials, lighting, speed | **in progress** |
-| 4 | `feature/preview-pane`: `/p <hwnd>` | to do |
+| 4 | `feature/preview-pane`: `/p <hwnd>` | **implemented**, stacked on PR 3 |
 | 5 | `feature/settings-dialog`: XP "3D Pipes Setup" dialog + registry | to do |
 | 6 | `feature/textured-pipes`: Solid/Textured + "Choose Texture..." | to do |
 | 7 | `feature/teapot`: Utah teapot easter egg | to do |
@@ -218,3 +218,12 @@ client area. It ignores input-to-exit and quits when the parent goes away.
     - Regenerate preview.png from a plain `/shot` once settings are saved.
     - The resolution slider must keep the side count even (8/12/16/20) so
       cylinder and elbow facets line up; add a test for that.
+- **2026-11-07, PR 4:**
+  - Implemented `/p <hwnd>` and `/p:<hwnd>`: a disabled `WS_CHILD` filling
+    the given window, ignoring input, ending when the window closes, exiting
+    at once for a missing or bad handle.
+  - 82 tests pass, including whole-program runs inside a real 152×112
+    parent window. The test pumps messages while waiting, because
+    cross-process child creation sends messages to the parent's thread.
+  - The branch is stacked on `feature/original-look`. Rebase onto `main`
+    once #3 merges, then open its PR.
