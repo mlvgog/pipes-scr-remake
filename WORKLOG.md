@@ -19,8 +19,8 @@ merged with **rebase**.
 | # | Branch | Status |
 |---|---|---|
 | 1 | `feature/test-suite`: test suite, Windows CI, testable `pipes.c` | **merged** ([#1](https://github.com/mlvgog/pipes-scr-remake/pull/1)) |
-| 2 | `feature/original-scene-rules`: the original's simulation | **in progress** |
-| 3 | `feature/original-look`: camera, proportions, materials, lighting, speed | to do |
+| 2 | `feature/original-scene-rules`: the original's simulation | **merged** ([#2](https://github.com/mlvgog/pipes-scr-remake/pull/2)) |
+| 3 | `feature/original-look`: camera, proportions, materials, lighting, speed | **in progress** |
 | 4 | `feature/preview-pane`: `/p <hwnd>` | to do |
 | 5 | `feature/settings-dialog`: XP "3D Pipes Setup" dialog + registry | to do |
 | 6 | `feature/textured-pipes`: Solid/Textured + "Choose Texture..." | to do |
@@ -29,10 +29,15 @@ merged with **rebase**.
 
 ## Next step
 
-PR 2 is open as [#2](https://github.com/mlvgog/pipes-scr-remake/pull/2) and
-has been reviewed (fixes pushed). Next: green CI, put the review summary in
-the PR body, rebase-merge, then cut `feature/original-look` from the new
-`main`.
+PR 3 (`feature/original-look`) is implemented: 76 tests pass under Wine,
+and the renders look like the XP saver. Next: commit, push, open the PR,
+send the owner renders, then CI, review and rebase-merge. After that, cut
+`feature/preview-pane` from the new `main`.
+
+Housekeeping: the git proxy in cloud sessions refuses to delete remote
+branches, so the merged `feature/test-suite` and
+`feature/original-scene-rules` are still on GitHub (harmless; delete them in
+the GitHub UI).
 
 ## The release (PR 8)
 
@@ -192,3 +197,13 @@ client area. It ignores input-to-exit and quits when the parent goes away.
   - Tests grew to 68, all passing under Wine.
   - The default render is now one pipe of elbows, as in the original's
     default settings.
+- **2026-11-07, PR 2:** CI green and merged #2 by rebase.
+- **2026-11-07, PR 3:**
+  - Implemented the original's look:
+    - 15-node grid, 7-unit spacing, radius 1.
+    - 90° camera at 75 units; far plane from the grid.
+    - Tight elbows, 5-unit short pieces, `√2/cos(π/8)` balls, 8 sides.
+    - The 16 tea materials, the original's light, back-face culling.
+    - 33 ms steps; resize starts a fresh scene.
+  - preview.png is a 140-step render with Multiple + Mixed switched on.
+  - 76 tests pass.

@@ -123,12 +123,15 @@ file-scope statics; no dynamic allocation except one `calloc` per `Scene`.
   tessellation). Tune look-and-feel here, not in the drawing code. The
   user-facing options are the globals `multiplePipes` and
   `jointStyleSetting` (`JOINT_ELBOW/BALL/MIXED/CYCLE`).
-- **`Prim`** — one drawn primitive: cylinder (start point + axis direction +
-  length), sphere (center + radius), or elbow (grid node + in/out
-  directions). The whole picture is a flat append-only list of prims that is
-  re-rendered every frame; "growing" a straight pipe just increments the
-  `len` of its last cylinder prim, and a turn retracts that cylinder by
-  `ELBOW_R` before inserting the torus.
+- **Materials** — `TEA_MATERIALS` is the classic OpenGL "tea" material
+  table (24 entries: ambient, diffuse, specular RGB + shininess/128);
+  `PIPE_MATERIALS` lists the 16 the original picks pipes from.
+  `applyMaterial` sets them with `glMaterialfv` (no `GL_COLOR_MATERIAL`).
+- **`Prim`** — one drawn primitive with a material: cylinder (start point +
+  axis direction + length), sphere (center + radius), or elbow (grid node +
+  in/out directions). The whole picture is a flat append-only list of prims
+  that is re-rendered every frame; "growing" a straight pipe just increments
+  the `len` of its last cylinder prim by `CELL`.
 - **`Pipe`** — a walker on the grid: `state` (`PIPE_ACTIVE`, `PIPE_STUCK`,
   `PIPE_OUT_OF_NODES`), position, direction, its own `weightStraight`,
   chase roles (`followsLead`, `startsFarAway`), the prim index of the
@@ -173,20 +176,42 @@ file-scope statics; no dynamic allocation except one `calloc` per `Scene`.
 
 - Directions are encoded 0–5 as +x,−x,+y,−y,+z,−z; **opposite is `d ^ 1`**.
   The `DV` table maps codes to vectors.
-- Grid nodes are `CELL` apart; `nodeWorld()` centers the grid on the origin.
-  The camera sits on +Z at `camZ` looking down −Z; pipes are axis-aligned to
-  the view, like the original.
+- The original's units: nodes are `CELL` = 7 apart, pipes have radius
+  `PIPE_R` = 1. `gridForViewport` gives 15 nodes along the longer screen
+  side, `(int)(15/aspect)` along the shorter and 15 deep; `nodeWorld()`
+  centers the grid on the origin. The camera is at z = `EYE_DISTANCE` (75)
+  looking down −Z with a 90° vertical field of view (`glFrustum` with
+  near 1 and `farPlane`), then turned by the scene's rotation about Y.
+  A window resize regrids and starts a fresh scene (`sceneResize`), as the
+  original did.
+- A pipe piece runs from one radius past a node to one radius before the
+  next: the first stretch after a start or a joint is `SHORT_PIPE`
+  (7 − 2 = 5) long, and each straight step adds `CELL`. Joints and caps sit
+  on the node and fill the gap: balls/caps have radius `ballRadius()` =
+  √2·R/cos(π/slices) (just enough to hide the corners of a faceted pipe end).
 - The elbow display list is a quarter torus in the local XY plane: arc from
-  `(ELBOW_R,0,0)` (tangent +Y) to `(0,ELBOW_R,0)` (tangent −X). Placement
-  maps local +Y to the incoming travel direction `d1` and local −X to the
-  outgoing `d2`; the arc center is `node − ELBOW_R·d1 + ELBOW_R·d2`, and the
+  `(ELBOW_R,0,0)` (tangent +Y) to `(0,ELBOW_R,0)` (tangent −X), with
+  `ELBOW_R` = `PIPE_R` (the original's tight elbow). Placement
+  (`elbowMatrix`) maps local +Y to the incoming travel direction `d1` and
+  local −X to the outgoing `d2`; the arc center is
+  `node − ELBOW_R·d1 + ELBOW_R·d2`, so the arc starts exactly where the
+  incoming pipe ends and finishes where the outgoing one begins, and the
   third basis vector is the cross product so the matrix stays a proper
-  rotation. The incoming cylinder must be shortened by `ELBOW_R` or it pokes
-  through the outside of the bend.
+  rotation.
+- Tessellation is `slices` (8 by default, like the original): cylinders and
+  elbow rings have `slices` sides, spheres `slices`×`slices`, elbows
+  `slices/2` segments along the bend. With an even side count every ring
+  has vertices on the axis directions, so cylinder and elbow facets line up.
+- Back-face culling is on, so every display list must wind its quads
+  counter-clockwise seen from outside (the cylinder and sphere strips emit
+  the far vertex of each pair first for that reason).
+- Lighting is the original's: global ambient 1.0, one directional light at
+  (90, 90, 150) in eye space with ambient 0.1, diffuse 1 and the default
+  white specular.
 - Cylinders are unit-length along +Z in the display list and scaled by
   `glScalef(1,1,len)` — side normals have z = 0, so the non-uniform scale
   does not corrupt lighting (and `GL_NORMALIZE` is enabled regardless, for
-  the uniformly scaled spheres).
+  the uniformly scaled unit spheres).
 - GL viewport origin is **bottom-left**; monitor rects from
   `EnumDisplayMonitors` are top-left in virtual-screen coordinates. The
   conversion lives in `monitorEnum` (`vy = winH − (yTop + h)`). Monitors can
