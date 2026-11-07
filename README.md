@@ -17,10 +17,14 @@ Win32 and fixed-function OpenGL 1.1 — the same technology as the original.
 
 ## What it replicates
 
-- Pipes grow stepwise through a 3D grid aligned with the view, in a
-  perspective volume against a black void.
-- Glossy, smooth-shaded pipes in random bright colors (one directional
-  light, strong specular highlight).
+- Pipes grow stepwise through the original's 3D grid (15 nodes along the
+  longer side of the screen and 15 deep, seen through a 90° lens from close
+  up, so near pipes are huge and far ones tiny), against a black void.
+- The original's proportions and finish: thin 8-sided smooth-shaded pipes,
+  tight elbows, balls one and a half pipes across, and each pipe in one of
+  the sixteen classic OpenGL materials (gold, brass, copper, bronze,
+  silver, jade, emerald, ruby, pearl, turquoise, plastics and rubbers) under
+  the original's single light.
 - **Joints** in the original's four styles: elbows (quarter-torus bends),
   balls (the big bulging sphere), mixed (about one turn in three gets a
   ball) and cycle (elbows, then balls, then mixed, changing every scene).

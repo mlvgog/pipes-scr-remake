@@ -10,13 +10,12 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-#define CELL        1.0f
-#define PIPE_R      0.30f
-#define ELBOW_R     0.42f
-#define BALL_R      0.44f
-#define CAP_R       0.38f
+#define CELL        7.0f
+#define PIPE_R      1.0f
+#define ELBOW_R     PIPE_R
+#define SHORT_PIPE  (CELL - 2.0f * PIPE_R)
 
-#define STEP_MS     45.0
+#define STEP_MS     33.0
 
 #define NORMAL_PIPES_PER_SCENE  5
 #define MULTIPLE_PIPES_FACTOR   1.5
@@ -32,19 +31,20 @@
 #define DISSOLVE_SQUARES_ACROSS_SHORT_SIDE  32
 #define MAX_DISSOLVE_SQUARES                16384
 
-#define FOV_Y       34.0
+#define FOV_Y                  90.0
+#define NEAR_PLANE             1.0
+#define EYE_DISTANCE           75.0
+#define NODES_ACROSS_LONG_SIDE 15
+#define MAXX                   NODES_ACROSS_LONG_SIDE
+#define MAXY                   NODES_ACROSS_LONG_SIDE
+#define MAXZ                   NODES_ACROSS_LONG_SIDE
 
-#define GRID_NY     12
-#define GRID_NZ     14
-#define MAXX        64
-#define MAXY        32
-#define MAXZ        32
+#define DEFAULT_SLICES 8
+#define MIN_SLICES     4
+#define MAX_SLICES     64
 
-#define CYL_SLICES  20
-#define SPH_SLICES  18
-#define SPH_STACKS  12
-#define ARC_SEGS    12
-#define TUBE_SLICES 18
+#define GLOBAL_AMBIENT  1.0f
+#define LIGHT_AMBIENT   0.1f
 
 #define MAX_PRIMS   60000
 #define MAX_SCENES  8
@@ -58,12 +58,18 @@ enum { PRIM_CYL, PRIM_SPH, PRIM_ELB };
 enum { JOINT_ELBOW, JOINT_BALL, JOINT_MIXED, JOINT_CYCLE };
 enum { PIPE_ACTIVE, PIPE_STUCK, PIPE_OUT_OF_NODES };
 enum { SCENE_GROWING, SCENE_FINISHED, SCENE_DISSOLVING };
+enum {
+    EMERALD, JADE, OBSIDIAN, PEARL, RUBY, TURQUOISE, BRASS, BRONZE, CHROME,
+    COPPER, GOLD, SILVER, BLACK_PLASTIC, CYAN_PLASTIC, GREEN_PLASTIC,
+    RED_PLASTIC, WHITE_PLASTIC, YELLOW_PLASTIC, BLACK_RUBBER, CYAN_RUBBER,
+    GREEN_RUBBER, RED_RUBBER, WHITE_RUBBER, YELLOW_RUBBER, NUM_TEA_MATERIALS
+};
 
 #define NO_DIRECTION (-1)
 
 typedef struct {
     int   type;
-    float col[3];
+    int   material;
     float a[3];
     int   d1, d2;
     float len;
@@ -79,13 +85,13 @@ typedef struct {
     int   startsFarAway;
     int   retired;
     int   lastCyl;
-    float col[3];
+    int   material;
 } Pipe;
 
 typedef struct {
     int    vx, vy, vw, vh;
     int    NX, NY, NZ;
-    double aspect, dFront, camZ;
+    double aspect;
     unsigned char grid[MAXX][MAXY][MAXZ];
     Prim   prims[MAX_PRIMS];
     int    nPrims;
@@ -94,6 +100,7 @@ typedef struct {
     int    lead;
     int    pipesStarted;
     int    pipeBudget;
+    int    pipesDrawn;
     int    chase;
     int    jointStyle;
     int    phase;
@@ -142,24 +149,63 @@ static int    haveMouseStart;
 
 static int    multiplePipes = 0;
 static int    jointStyleSetting = JOINT_ELBOW;
+static int    slices = DEFAULT_SLICES;
 
-static float frand(void) { return (float)rand() / (float)RAND_MAX; }
+static const float TEA_MATERIALS[NUM_TEA_MATERIALS][10] = {
+    { .0215f, .1745f, .0215f, .07568f, .61424f, .07568f, .633f, .727811f, .633f, .6f },
+    { .135f, .2225f, .1575f, .54f, .89f, .63f, .316228f, .316228f, .316228f, .1f },
+    { .05375f, .05f, .06625f, .18275f, .17f, .22525f, .332741f, .328634f, .346435f, .3f },
+    { .25f, .20725f, .20725f, 1.0f, .829f, .829f, .296648f, .296648f, .296648f, .088f },
+    { .1745f, .01175f, .01175f, .61424f, .04136f, .04136f, .727811f, .626959f, .626959f, .6f },
+    { .1f, .18725f, .1745f, .396f, .74151f, .69102f, .297254f, .30829f, .306678f, .1f },
+    { .329412f, .223529f, .027451f, .780392f, .568627f, .113725f, .992157f, .941176f, .807843f, .21794872f },
+    { .2125f, .1275f, .054f, .714f, .4284f, .18144f, .393548f, .271906f, .166721f, .2f },
+    { .25f, .25f, .25f, .4f, .4f, .4f, .774597f, .774597f, .774597f, .6f },
+    { .19125f, .0735f, .0225f, .7038f, .27048f, .0828f, .256777f, .137622f, .086014f, .1f },
+    { .24725f, .1995f, .0745f, .75164f, .60648f, .22648f, .628281f, .555802f, .366065f, .4f },
+    { .19225f, .19225f, .19225f, .50754f, .50754f, .50754f, .508273f, .508273f, .508273f, .4f },
+    { 0.0f, 0.0f, 0.0f, .01f, .01f, .01f, .5f, .5f, .5f, .25f },
+    { 0.0f, .1f, .06f, 0.0f, .50980392f, .50980392f, .50196078f, .50196078f, .50196078f, .25f },
+    { 0.0f, 0.0f, 0.0f, .1f, .35f, .1f, .45f, .55f, .45f, .25f },
+    { .05f, 0.0f, 0.0f, .5f, 0.0f, 0.0f, .7f, .6f, .6f, .25f },
+    { 0.0f, 0.0f, 0.0f, .55f, .55f, .55f, .7f, .7f, .7f, .25f },
+    { 0.0f, 0.0f, 0.0f, .5f, .5f, 0.0f, .6f, .6f, .5f, .25f },
+    { .02f, .02f, .02f, .01f, .01f, .01f, .4f, .4f, .4f, .078125f },
+    { 0.0f, .05f, .05f, .4f, .5f, .5f, .04f, .7f, .7f, .078125f },
+    { 0.0f, .05f, 0.0f, .4f, .5f, .4f, .04f, .7f, .04f, .078125f },
+    { .05f, 0.0f, 0.0f, .5f, .4f, .4f, .7f, .04f, .04f, .078125f },
+    { .05f, .05f, .05f, .5f, .5f, .5f, .7f, .7f, .7f, .078125f },
+    { .05f, .05f, 0.0f, .5f, .5f, .4f, .7f, .7f, .04f, .078125f }
+};
 
-static void randomColor(float *c)
+static const int PIPE_MATERIALS[] = {
+    EMERALD, JADE, PEARL, RUBY, TURQUOISE, BRASS, BRONZE, COPPER, GOLD,
+    SILVER, CYAN_PLASTIC, WHITE_PLASTIC, YELLOW_PLASTIC, CYAN_RUBBER,
+    GREEN_RUBBER, WHITE_RUBBER
+};
+
+#define NUM_PIPE_MATERIALS ((int)(sizeof PIPE_MATERIALS / sizeof PIPE_MATERIALS[0]))
+
+static void applyMaterial(int material)
 {
-    float h = frand() * 6.0f;
-    float s = 0.85f + frand() * 0.15f;
-    int   i = (int)h % 6;
-    float f = h - (float)((int)h);
-    float p = 1.0f - s, q = 1.0f - s * f, t = 1.0f - s * (1.0f - f);
-    switch (i) {
-    case 0: c[0] = 1; c[1] = t; c[2] = p; break;
-    case 1: c[0] = q; c[1] = 1; c[2] = p; break;
-    case 2: c[0] = p; c[1] = 1; c[2] = t; break;
-    case 3: c[0] = p; c[1] = q; c[2] = 1; break;
-    case 4: c[0] = t; c[1] = p; c[2] = 1; break;
-    default:c[0] = 1; c[1] = p; c[2] = q; break;
+    const float *m = TEA_MATERIALS[material];
+    float ambient[4], diffuse[4], specular[4];
+    int k;
+    for (k = 0; k < 3; k++) {
+        ambient[k] = m[k];
+        diffuse[k] = m[3 + k];
+        specular[k] = m[6 + k];
     }
+    ambient[3] = diffuse[3] = specular[3] = 1.0f;
+    glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, ambient);
+    glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, diffuse);
+    glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, specular);
+    glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, m[9] * 128.0f);
+}
+
+static float ballRadius(void)
+{
+    return (float)(sqrt(2.0) * PIPE_R / cos(M_PI / slices));
 }
 
 static void buildCylinder(void)
@@ -168,33 +214,39 @@ static void buildCylinder(void)
     dlCyl = glGenLists(1);
     glNewList(dlCyl, GL_COMPILE);
     glBegin(GL_QUAD_STRIP);
-    for (i = 0; i <= CYL_SLICES; i++) {
-        float a = (float)(2.0 * M_PI * i / CYL_SLICES);
+    for (i = 0; i <= slices; i++) {
+        float a = (float)(2.0 * M_PI * i / slices);
         float c = cosf(a), s = sinf(a);
         glNormal3f(c, s, 0.0f);
-        glVertex3f(PIPE_R * c, PIPE_R * s, 0.0f);
         glVertex3f(PIPE_R * c, PIPE_R * s, 1.0f);
+        glVertex3f(PIPE_R * c, PIPE_R * s, 0.0f);
     }
     glEnd();
     glEndList();
 }
 
+static void sphereVertex(float latitude, float longitude)
+{
+    float x = cosf(latitude) * cosf(longitude);
+    float y = cosf(latitude) * sinf(longitude);
+    float z = sinf(latitude);
+    glNormal3f(x, y, z);
+    glVertex3f(x, y, z);
+}
+
 static void buildSphere(void)
 {
-    int i, j;
+    int i, j, stacks = slices;
     dlSph = glGenLists(1);
     glNewList(dlSph, GL_COMPILE);
-    for (i = 0; i < SPH_STACKS; i++) {
-        float t0 = (float)(M_PI * (-0.5 + (double)i / SPH_STACKS));
-        float t1 = (float)(M_PI * (-0.5 + (double)(i + 1) / SPH_STACKS));
+    for (i = 0; i < stacks; i++) {
+        float t0 = (float)(M_PI * (-0.5 + (double)i / stacks));
+        float t1 = (float)(M_PI * (-0.5 + (double)(i + 1) / stacks));
         glBegin(GL_QUAD_STRIP);
-        for (j = 0; j <= SPH_SLICES; j++) {
-            float a = (float)(2.0 * M_PI * j / SPH_SLICES);
-            float c = cosf(a), s = sinf(a);
-            glNormal3f(cosf(t0) * c, cosf(t0) * s, sinf(t0));
-            glVertex3f(cosf(t0) * c, cosf(t0) * s, sinf(t0));
-            glNormal3f(cosf(t1) * c, cosf(t1) * s, sinf(t1));
-            glVertex3f(cosf(t1) * c, cosf(t1) * s, sinf(t1));
+        for (j = 0; j <= slices; j++) {
+            float a = (float)(2.0 * M_PI * j / slices);
+            sphereVertex(t1, a);
+            sphereVertex(t0, a);
         }
         glEnd();
     }
@@ -203,15 +255,15 @@ static void buildSphere(void)
 
 static void buildElbow(void)
 {
-    int i, j;
+    int i, j, stacks = slices / 2 < 2 ? 2 : slices / 2;
     dlElb = glGenLists(1);
     glNewList(dlElb, GL_COMPILE);
-    for (i = 0; i < ARC_SEGS; i++) {
-        float t0 = (float)(M_PI * 0.5 * i / ARC_SEGS);
-        float t1 = (float)(M_PI * 0.5 * (i + 1) / ARC_SEGS);
+    for (i = 0; i < stacks; i++) {
+        float t0 = (float)(M_PI * 0.5 * i / stacks);
+        float t1 = (float)(M_PI * 0.5 * (i + 1) / stacks);
         glBegin(GL_QUAD_STRIP);
-        for (j = 0; j <= TUBE_SLICES; j++) {
-            float p = (float)(2.0 * M_PI * j / TUBE_SLICES);
+        for (j = 0; j <= slices; j++) {
+            float p = (float)(2.0 * M_PI * j / slices);
             float cp = cosf(p), sp = sinf(p);
             float t, ct, st;
             int k;
@@ -251,20 +303,20 @@ static void finishScene(Scene *s)
     if (s->phase == SCENE_GROWING) s->phase = SCENE_FINISHED;
 }
 
-static int addPrim(Scene *s, int type, const float *col)
+static int addPrim(Scene *s, int type, int material)
 {
     Prim *p;
     if (s->nPrims >= MAX_PRIMS) { finishScene(s); return -1; }
     p = &s->prims[s->nPrims];
     memset(p, 0, sizeof *p);
     p->type = type;
-    p->col[0] = col[0]; p->col[1] = col[1]; p->col[2] = col[2];
+    p->material = material;
     return s->nPrims++;
 }
 
-static int addCyl(Scene *s, const float *start, int dir, float len, const float *col)
+static int addCyl(Scene *s, const float *start, int dir, float len, int material)
 {
-    int i = addPrim(s, PRIM_CYL, col);
+    int i = addPrim(s, PRIM_CYL, material);
     if (i < 0) return -1;
     memcpy(s->prims[i].a, start, 3 * sizeof(float));
     s->prims[i].d1 = dir;
@@ -272,17 +324,17 @@ static int addCyl(Scene *s, const float *start, int dir, float len, const float 
     return i;
 }
 
-static void addSph(Scene *s, const float *c, float r, const float *col)
+static void addSph(Scene *s, const float *c, float r, int material)
 {
-    int i = addPrim(s, PRIM_SPH, col);
+    int i = addPrim(s, PRIM_SPH, material);
     if (i < 0) return;
     memcpy(s->prims[i].a, c, 3 * sizeof(float));
     s->prims[i].r = r;
 }
 
-static void addElb(Scene *s, int x, int y, int z, int d1, int d2, const float *col)
+static void addElb(Scene *s, int x, int y, int z, int d1, int d2, int material)
 {
-    int i = addPrim(s, PRIM_ELB, col);
+    int i = addPrim(s, PRIM_ELB, material);
     if (i < 0) return;
     nodeWorld(s, x, y, z, s->prims[i].a);
     s->prims[i].d1 = d1;
@@ -409,6 +461,13 @@ static int findFreeNodeFarFrom(const Scene *s, const Pipe *p, int *pos)
     return findRandomFreeNode(s, pos);
 }
 
+static void pointAlong(const float *from, int d, float distance, float *out)
+{
+    out[0] = from[0] + DV[d][0] * distance;
+    out[1] = from[1] + DV[d][1] * distance;
+    out[2] = from[2] + DV[d][2] * distance;
+}
+
 static void movePipe(Pipe *p, int d)
 {
     p->dir = d;
@@ -420,20 +479,22 @@ static void movePipe(Pipe *p, int d)
 static int startPipe(Scene *s, Pipe *p)
 {
     int pos[3], found, d;
-    float w[3];
+    float w[3], start[3];
     found = p->startsFarAway ? findFreeNodeFarFrom(s, p, pos) : findRandomFreeNode(s, pos);
     if (!found) { p->state = PIPE_OUT_OF_NODES; return 0; }
     p->x = pos[0]; p->y = pos[1]; p->z = pos[2];
     s->grid[p->x][p->y][p->z] = 1;
+    s->pipesDrawn++;
     p->lastCyl = -1;
-    randomColor(p->col);
+    p->material = PIPE_MATERIALS[randomBelow(NUM_PIPE_MATERIALS)];
     p->dir = randomBelow(6);
     d = chooseDirection(s, p);
     nodeWorld(s, p->x, p->y, p->z, w);
-    addSph(s, w, CAP_R, p->col);
+    addSph(s, w, ballRadius(), p->material);
     if (d == NO_DIRECTION) { p->state = PIPE_STUCK; return 1; }
     p->state = PIPE_ACTIVE;
-    p->lastCyl = addCyl(s, w, d, CELL, p->col);
+    pointAlong(w, d, PIPE_R, start);
+    p->lastCyl = addCyl(s, start, d, SHORT_PIPE, p->material);
     movePipe(p, d);
     return 1;
 }
@@ -441,7 +502,7 @@ static int startPipe(Scene *s, Pipe *p)
 static void growPipe(Scene *s, Pipe *p)
 {
     int d;
-    float w[3];
+    float w[3], start[3];
 
     if (p->state == PIPE_OUT_OF_NODES) { p->state = PIPE_STUCK; return; }
     if (p->state != PIPE_ACTIVE) return;
@@ -449,25 +510,21 @@ static void growPipe(Scene *s, Pipe *p)
     d = chooseDirection(s, p);
     nodeWorld(s, p->x, p->y, p->z, w);
     if (d == NO_DIRECTION) {
-        addSph(s, w, CAP_R, p->col);
+        addSph(s, w, ballRadius(), p->material);
         p->state = PIPE_STUCK;
         return;
     }
 
-    if (d == p->dir) {
-        if (p->lastCyl >= 0) s->prims[p->lastCyl].len += CELL;
-        else p->lastCyl = addCyl(s, w, d, CELL, p->col);
-    } else if (turnGetsBallJoint(s)) {
-        addSph(s, w, BALL_R, p->col);
-        p->lastCyl = addCyl(s, w, d, CELL, p->col);
+    if (d == p->dir && p->lastCyl >= 0) {
+        s->prims[p->lastCyl].len += CELL;
+    } else if (d == p->dir) {
+        pointAlong(w, d, -PIPE_R, start);
+        p->lastCyl = addCyl(s, start, d, CELL, p->material);
     } else {
-        float st[3];
-        if (p->lastCyl >= 0) s->prims[p->lastCyl].len -= ELBOW_R;
-        addElb(s, p->x, p->y, p->z, p->dir, d, p->col);
-        st[0] = w[0] + DV[d][0] * ELBOW_R;
-        st[1] = w[1] + DV[d][1] * ELBOW_R;
-        st[2] = w[2] + DV[d][2] * ELBOW_R;
-        p->lastCyl = addCyl(s, st, d, CELL - ELBOW_R, p->col);
+        if (turnGetsBallJoint(s)) addSph(s, w, ballRadius(), p->material);
+        else addElb(s, p->x, p->y, p->z, p->dir, d, p->material);
+        pointAlong(w, d, PIPE_R, start);
+        p->lastCyl = addCyl(s, start, d, SHORT_PIPE, p->material);
     }
     movePipe(p, d);
 }
@@ -508,6 +565,7 @@ static void startScene(Scene *s, int afterDissolve)
     }
 
     s->pipesStarted = 0;
+    s->pipesDrawn = 0;
     for (i = 0; i < startingPipes; i++) {
         Pipe *p = &s->pipes[s->nPipes++];
         preparePipe(p);
@@ -631,19 +689,32 @@ static int anySceneRunning(void)
     return 0;
 }
 
+static void gridForViewport(int width, int height, int *nx, int *ny, int *nz)
+{
+    double aspect = height > 0 ? (double)width / height : 1.0;
+    if (width >= height) {
+        *nx = NODES_ACROSS_LONG_SIDE;
+        *ny = (int)(NODES_ACROSS_LONG_SIDE / aspect);
+    } else {
+        *ny = NODES_ACROSS_LONG_SIDE;
+        *nx = (int)(NODES_ACROSS_LONG_SIDE * aspect);
+    }
+    if (*nx < 1) *nx = 1;
+    if (*ny < 1) *ny = 1;
+    *nz = NODES_ACROSS_LONG_SIDE;
+}
+
 static void sceneGeometry(Scene *s)
 {
-    double tanHalf = tan(FOV_Y * 0.5 * M_PI / 180.0);
     s->aspect = (s->vh > 0) ? (double)s->vw / (double)s->vh : 1.0;
-    s->dFront = (s->NY * CELL * 0.5 * 0.94) / tanHalf;
-    s->camZ = s->NZ * CELL * 0.5 + s->dFront;
-    if (s->NX == 0) {
-        double hx = tanHalf * s->aspect * (s->dFront + s->NZ * CELL * 0.5);
-        int nx = (int)(hx * 2.0 / CELL) + 1;
-        if (nx > MAXX) nx = MAXX;
-        if (nx < 8) nx = 8;
-        s->NX = nx;
-    }
+    gridForViewport(s->vw, s->vh, &s->NX, &s->NY, &s->NZ);
+}
+
+static double farPlane(const Scene *s)
+{
+    int longest = s->NX > s->NY ? s->NX : s->NY;
+    double depth = (double)longest / NODES_ACROSS_LONG_SIDE * (NODES_ACROSS_LONG_SIDE + 1) * CELL;
+    return EYE_DISTANCE + 2.0 * depth;
 }
 
 static Scene *sceneCreate(int vx, int vy, int vw, int vh)
@@ -651,12 +722,19 @@ static Scene *sceneCreate(int vx, int vy, int vw, int vh)
     Scene *s = (Scene *)calloc(1, sizeof(Scene));
     if (!s) return NULL;
     s->vx = vx; s->vy = vy; s->vw = vw; s->vh = vh;
-    s->NY = GRID_NY;
-    s->NZ = GRID_NZ;
     sceneGeometry(s);
     s->jointStyle = JOINT_MIXED;
     startScene(s, 0);
     return s;
+}
+
+static void sceneResize(Scene *s, int vw, int vh)
+{
+    if (vw <= 0 || vh <= 0 || (vw == s->vw && vh == s->vh)) return;
+    s->vw = vw;
+    s->vh = vh;
+    sceneGeometry(s);
+    startScene(s, 0);
 }
 
 static BOOL CALLBACK monitorEnum(HMONITOR hm, HDC hdcMon, LPRECT rc, LPARAM lp)
@@ -728,24 +806,24 @@ static void elbowMatrix(const Prim *p, float *m)
 
 static void sceneDraw(const Scene *s)
 {
-    double znear = s->dFront * 0.45;
-    double zfar = s->camZ + s->NZ * CELL + 5.0;
-    double tanHalf = tan(FOV_Y * 0.5 * M_PI / 180.0);
-    double t = tanHalf * znear;
-    int i;
+    double t = NEAR_PLANE * tan(FOV_Y * 0.5 * M_PI / 180.0);
+    int i, material = -1;
 
     glViewport(s->vx, s->vy, s->vw, s->vh);
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
-    glFrustum(-t * s->aspect, t * s->aspect, -t, t, znear, zfar);
+    glFrustum(-t * s->aspect, t * s->aspect, -t, t, NEAR_PLANE, farPlane(s));
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
-    glTranslatef(0.0f, 0.0f, (float)-s->camZ);
+    glTranslatef(0.0f, 0.0f, (float)-EYE_DISTANCE);
     glRotatef(s->rotation, 0.0f, 1.0f, 0.0f);
 
     for (i = 0; i < s->nPrims; i++) {
         const Prim *p = &s->prims[i];
-        glColor3fv(p->col);
+        if (p->material != material) {
+            material = p->material;
+            applyMaterial(material);
+        }
         glPushMatrix();
         switch (p->type) {
         case PRIM_CYL:
@@ -812,25 +890,26 @@ static void drawAll(void)
 
 static void initGL(void)
 {
-    const float lightDir[4]  = { -0.4f, 0.7f, 1.0f, 0.0f };
-    const float lightDif[4]  = { 0.95f, 0.95f, 0.95f, 1.0f };
-    const float lightAmb[4]  = { 0.18f, 0.18f, 0.18f, 1.0f };
-    const float lightSpc[4]  = { 0.9f, 0.9f, 0.9f, 1.0f };
-    const float matSpec[4]   = { 0.85f, 0.85f, 0.85f, 1.0f };
+    const float lightPosition[4] = { 90.0f, 90.0f, 150.0f, 0.0f };
+    const float lightAmbient[4]  = { LIGHT_AMBIENT, LIGHT_AMBIENT, LIGHT_AMBIENT, 1.0f };
+    const float lightDiffuse[4]  = { 1.0f, 1.0f, 1.0f, 1.0f };
+    const float sceneAmbient[4]  = { GLOBAL_AMBIENT, GLOBAL_AMBIENT, GLOBAL_AMBIENT, 1.0f };
 
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
     glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
     glEnable(GL_LIGHTING);
     glEnable(GL_LIGHT0);
     glEnable(GL_NORMALIZE);
     glShadeModel(GL_SMOOTH);
-    glLightfv(GL_LIGHT0, GL_POSITION, lightDir);
-    glLightfv(GL_LIGHT0, GL_DIFFUSE,  lightDif);
-    glLightfv(GL_LIGHT0, GL_AMBIENT,  lightAmb);
-    glLightfv(GL_LIGHT0, GL_SPECULAR, lightSpc);
-    glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, matSpec);
-    glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 60.0f);
-    glEnable(GL_COLOR_MATERIAL);
-    glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
+    glFrontFace(GL_CCW);
+    glCullFace(GL_BACK);
+    glEnable(GL_CULL_FACE);
+    glLightModelfv(GL_LIGHT_MODEL_AMBIENT, sceneAmbient);
+    glLightfv(GL_LIGHT0, GL_POSITION, lightPosition);
+    glLightfv(GL_LIGHT0, GL_AMBIENT, lightAmbient);
+    glLightfv(GL_LIGHT0, GL_DIFFUSE, lightDiffuse);
 
     buildCylinder();
     buildSphere();
@@ -955,11 +1034,7 @@ static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_SIZE:
         winW = LOWORD(lp); winH = HIWORD(lp);
-        if (!fullscreen && nScenes == 1) {
-            scenes[0]->vw = winW;
-            scenes[0]->vh = winH;
-            sceneGeometry(scenes[0]);
-        }
+        if (!fullscreen && nScenes == 1) sceneResize(scenes[0], winW, winH);
         return 0;
     case WM_KEYDOWN:
         if (fullscreen || wp == VK_ESCAPE) DestroyWindow(h);
