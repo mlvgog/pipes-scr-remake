@@ -51,7 +51,8 @@ Win32 and fixed-function OpenGL 1.1 — the same technology as the original.
 ## Build
 
 Requires any MinGW-w64 gcc (e.g. [MSYS2](https://www.msys2.org/) ucrt64).
-No libraries beyond what ships with Windows (`opengl32`, `gdi32`, `user32`).
+No libraries beyond what ships with Windows (`opengl32`, `gdi32`, `user32`, and
+`advapi32` for saving the settings).
 
 ```powershell
 .\build.ps1
@@ -60,10 +61,10 @@ No libraries beyond what ships with Windows (`opengl32`, `gdi32`, `user32`).
 or directly:
 
 ```
-gcc -O2 -Wall -Wextra -o pipes.exe pipes.c -lopengl32 -lgdi32 -luser32 -mwindows
+gcc -O2 -Wall -Wextra -o pipes.exe pipes.c -lopengl32 -lgdi32 -luser32 -ladvapi32 -mwindows
 ```
 
-MSVC works too: `cl /O2 pipes.c /link opengl32.lib gdi32.lib user32.lib /subsystem:windows`
+MSVC works too: `cl /O2 pipes.c /link opengl32.lib gdi32.lib user32.lib advapi32.lib /subsystem:windows`
 
 ## Run
 
@@ -71,7 +72,7 @@ MSVC works too: `cl /O2 pipes.c /link opengl32.lib gdi32.lib user32.lib /subsyst
 |---|---|
 | `pipes.exe` | Windowed (1280x720), Esc to quit |
 | `pipes.exe /s` | Fullscreen on all monitors — any key, click, or mouse movement exits |
-| `pipes.exe /c` | Screensaver "configure" stub |
+| `pipes.exe /c` | The "3D Pipes Setup" settings dialog (also what Windows' **Settings** button and double-clicking the `.scr` open) |
 | `pipes.exe /p <hwnd>` | Draws the little live preview inside Windows' screen saver settings (the window it is given) and ends when that window closes |
 | `pipes.exe /shot out.bmp [steps] [seed]` | Simulate N growth steps, render one 1280x720 frame to a BMP, exit (used for visual testing; a seed makes the picture reproducible) |
 
@@ -120,19 +121,27 @@ implemented:
 
 - **The teapot easter egg** — the original very rarely rendered a Utah
   teapot in place of a joint. Needs the teapot Bezier patch data.
-- **Configuration dialog** — the original let you choose pipe count
-  (single/multiple), joint style (elbow/ball/mixed/cycle), surface style
-  (solid/textured), speed and resolution. Here those are compile-time
-  settings in `pipes.c` (`multiplePipes`, `jointStyleSetting`, `STEP_MS`,
-  …) and `/c` just shows a message box.
 - **Textured pipes** — the original's optional marble/texture surface mode.
+
+## Settings
+
+**3D Pipes Setup** (Screen Saver Settings → *Settings…*, or `pipes.exe /c`)
+has the XP saver's choices:
+
+- **Pipes:** *Single* (one pipe at a time, five per scene; the default) or
+  *Multiple* (two to four at once, seven per scene, sometimes a chase).
+- **Joint Type:** *Elbow* (default), *Ball*, *Mixed* (one turn in three is
+  a ball) or *Cycle* (elbows, balls, mixed, changing every scene).
+- **Speed:** *Slow* to *Fast*; the middle is the original's pace.
+- **Resolution:** *Min* to *Max*: 8, 12, 16 or 20 sides per pipe (8 is the
+  original's default).
+
+They are saved per user under `HKEY_CURRENT_USER\Software\pipes-scr-remake`.
 
 ## Tuning
 
 All the knobs are constants at the top of [pipes.c](pipes.c): pipe radius,
-elbow/ball radii, growth speed (`STEP_MS`), pipes per scene
-(`NORMAL_PIPES_PER_SCENE`, `MULTIPLE_PIPES_FACTOR`), straight-run weights,
-the ball share of mixed joints, the chase odds, the dissolve
-(`DISSOLVE_MS`, square size) and the per-scene turn. Single/multiple pipes
-and the joint style are `multiplePipes` and `jointStyleSetting` (Single and
-Elbow by default, as in the original) until the settings dialog arrives.
+grid size, camera, pipes per scene (`NORMAL_PIPES_PER_SCENE`,
+`MULTIPLE_PIPES_FACTOR`), straight-run weights, the ball share of mixed
+joints, the chase odds, the dissolve (`DISSOLVE_MS`, square size), the
+per-scene turn and the speed range (`SLOWEST_STEP_MS`, `FASTEST_STEP_MS`).

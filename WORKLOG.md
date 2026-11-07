@@ -21,18 +21,19 @@ merged with **rebase**.
 | 1 | `feature/test-suite`: test suite, Windows CI, testable `pipes.c` | **merged** ([#1](https://github.com/mlvgog/pipes-scr-remake/pull/1)) |
 | 2 | `feature/original-scene-rules`: the original's simulation | **merged** ([#2](https://github.com/mlvgog/pipes-scr-remake/pull/2)) |
 | 3 | `feature/original-look`: camera, proportions, materials, lighting, speed | **merged** ([#3](https://github.com/mlvgog/pipes-scr-remake/pull/3)) |
-| 4 | `feature/preview-pane`: `/p <hwnd>` | **in review** |
-| 5 | `feature/settings-dialog`: XP "3D Pipes Setup" dialog + registry | to do |
+| 4 | `feature/preview-pane`: `/p <hwnd>` | **merged** ([#4](https://github.com/mlvgog/pipes-scr-remake/pull/4)) |
+| 5 | `feature/settings-dialog`: XP "3D Pipes Setup" dialog + registry | **in review** |
 | 6 | `feature/textured-pipes`: Solid/Textured + "Choose Texture..." | to do |
 | 7 | `feature/teapot`: Utah teapot easter egg | to do |
 | 8 | `feature/release`: a really good first release | to do |
 
 ## Next step
 
-PR 4 (`feature/preview-pane`) is rebased onto `main` and its PR is open.
-Next: CI, review, rebase-merge. Then cut `feature/settings-dialog` from
-`main` (the spec is below, and two items are carried over from PR 3: regenerate
-preview.png from a plain `/shot`, and keep the slider's side counts even).
+PR 5 (`feature/settings-dialog`) is implemented: 100 tests pass under Wine.
+Next: open its PR, then CI, review and rebase-merge. Then cut
+`feature/textured-pipes` from `main`. Add a Surface Style group
+(Solid/Textured + "Choose Texture...") to `buildSettingsDialog` and the
+`Settings` struct, with registry values `SurfaceStyle` and `TexturePath`.
 
 Housekeeping: the git proxy in cloud sessions refuses to delete remote
 branches, so the merged `feature/test-suite` and
@@ -239,3 +240,19 @@ client area. It ignores input-to-exit and quits when the parent goes away.
   - Note for local mutation runs: don't call `winepath` inside the
     `xvfb-run` command line. It starts a display-less wineserver that the
     test run then joins, and every window fails.
+- **2026-11-07:** CI green on #4 (84 tests on Windows); merged by rebase.
+- **2026-11-07, PR 5:**
+  - Settings: Single/Multiple, Joint Type, Speed (log scale 100→11 ms,
+    centre 33 ms) and Resolution (0–200 → 8/12/16/20 sides, the original's
+    mapping; the bands are 0–50, 51–100, 101–150, 151–200).
+  - They live in `HKCU\Software\pipes-scr-remake`, and
+    `PIPES_SETTINGS_KEY` redirects them for the tests.
+  - The "3D Pipes Setup" dialog is built from an in-memory `DLGTEMPLATE`.
+    `/c:<hwnd>` gives it an owner, and the `.scr` with no arguments opens
+    it.
+  - Settings now apply in every mode, including `/shot`.
+  - A plain `/shot` with saved Multiple + Mixed reproduces preview.png
+    exactly, which resolves PR 3's "not reproducible" review item.
+  - 100 tests pass.
+  - Test lesson: a dialog owned by a window in the test process needs the
+    test to pump messages while the dialog is created.

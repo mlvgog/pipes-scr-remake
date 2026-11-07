@@ -8,6 +8,7 @@
 #define PROGRAM_TIMEOUT_MS 60000
 #define WINDOW_TIMEOUT_MS 15000
 #define DIALOG_SETTLE_MS 500
+#define TEST_SETTINGS_KEY "Software\\pipes-scr-remake-tests"
 
 static int  testsPassed;
 static int  testsFailed;
@@ -93,8 +94,243 @@ static void runTest(const char *name, void (*test)(void))
 static LaunchOptions parsed(const char *commandLine)
 {
     LaunchOptions options;
-    parseCommandLine(commandLine, &options);
+    parseCommandLine(commandLine, 0, &options);
     return options;
+}
+
+static LaunchOptions parsedAsScrFile(const char *commandLine)
+{
+    LaunchOptions options;
+    parseCommandLine(commandLine, 1, &options);
+    return options;
+}
+
+typedef struct {
+    int multiple;
+    int joints;
+} SavedSettings;
+
+static SavedSettings useSettings(int multiple, int joints)
+{
+    SavedSettings saved;
+    saved.multiple = multiplePipes;
+    saved.joints = jointStyleSetting;
+    multiplePipes = multiple;
+    jointStyleSetting = joints;
+    return saved;
+}
+
+static void restoreSettings(SavedSettings saved)
+{
+    multiplePipes = saved.multiple;
+    jointStyleSetting = saved.joints;
+}
+
+static void forgetTestSettings(void)
+{
+    RegDeleteKeyA(HKEY_CURRENT_USER, TEST_SETTINGS_KEY);
+}
+
+static void writeTestSetting(const char *name, DWORD value)
+{
+    HKEY key;
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, TEST_SETTINGS_KEY, 0, NULL, 0, KEY_WRITE, NULL, &key, NULL) != ERROR_SUCCESS)
+        return;
+    RegSetValueExA(key, name, 0, REG_DWORD, (const BYTE *)&value, sizeof value);
+    RegCloseKey(key);
+}
+
+static Settings settingsOf(int multiple, int joints, int speed, int resolution)
+{
+    Settings s;
+    s.multiplePipes = multiple;
+    s.jointStyle = joints;
+    s.speed = speed;
+    s.resolution = resolution;
+    return s;
+}
+
+static void expectSettings(const char *when, Settings expected, Settings actual)
+{
+    char what[128];
+    snprintf(what, sizeof what, "multiple pipes %s", when);
+    expectNumber(what, expected.multiplePipes, actual.multiplePipes);
+    snprintf(what, sizeof what, "joint type %s (0 elbow, 1 ball, 2 mixed, 3 cycle)", when);
+    expectNumber(what, expected.jointStyle, actual.jointStyle);
+    snprintf(what, sizeof what, "speed %s", when);
+    expectNumber(what, expected.speed, actual.speed);
+    snprintf(what, sizeof what, "resolution %s", when);
+    expectNumber(what, expected.resolution, actual.resolution);
+}
+
+static void the_resolution_slider_gives_eight_twelve_sixteen_or_twenty_sides(void)
+{
+    int r, odd = 0, outside = 0;
+    expectNumber("sides at the lowest resolution", 8, slicesForResolution(0));
+    expectNumber("sides at 50, the top of the first quarter", 8, slicesForResolution(50));
+    expectNumber("sides at 51", 12, slicesForResolution(51));
+    expectNumber("sides at 100", 12, slicesForResolution(100));
+    expectNumber("sides at 101", 16, slicesForResolution(101));
+    expectNumber("sides at 150", 16, slicesForResolution(150));
+    expectNumber("sides at 151", 20, slicesForResolution(151));
+    expectNumber("sides at the highest resolution", 20, slicesForResolution(MAX_RESOLUTION));
+    for (r = 0; r <= MAX_RESOLUTION; r++) {
+        int sides = slicesForResolution(r);
+        if (sides % 2) odd++;
+        if (sides < 8 || sides > 20) outside++;
+    }
+    expectNumber("slider positions giving an odd number of sides (facets would not line up)", 0, odd);
+    expectNumber("slider positions outside 8 to 20 sides", 0, outside);
+}
+
+static void the_speed_slider_runs_from_a_slow_crawl_to_fast(void)
+{
+    int speed, slowerThanBefore = 0;
+    expectNear("milliseconds per step at the slow end", 100.0, stepMsForSpeed(0));
+    expectBetween("milliseconds per step in the middle (the original's pace)", 32.5, 34.0, stepMsForSpeed(DEFAULT_SPEED));
+    expectNear("milliseconds per step at the fast end", 11.0, stepMsForSpeed(MAX_SPEED));
+    for (speed = 1; speed <= MAX_SPEED; speed++)
+        if (stepMsForSpeed(speed) >= stepMsForSpeed(speed - 1)) slowerThanBefore++;
+    expectNumber("slider positions that are not faster than the one before", 0, slowerThanBefore);
+}
+
+static void with_nothing_saved_the_original_defaults_apply(void)
+{
+    forgetTestSettings();
+    expectSettings("with nothing saved", settingsOf(0, JOINT_ELBOW, DEFAULT_SPEED, 0), loadSettings());
+}
+
+static void saved_settings_come_back_exactly(void)
+{
+    Settings chosen = settingsOf(1, JOINT_CYCLE, 87, 150);
+    forgetTestSettings();
+    expect(saveSettings(&chosen), "the settings to be saved");
+    expectSettings("after saving and loading", chosen, loadSettings());
+    forgetTestSettings();
+}
+
+static void nonsense_in_the_registry_falls_back_to_safe_values(void)
+{
+    forgetTestSettings();
+    writeTestSetting("MultiplePipes", 7);
+    writeTestSetting("JointType", 9);
+    writeTestSetting("Speed", 500);
+    writeTestSetting("Resolution", (DWORD)-5);
+    expectSettings("read from nonsense values", settingsOf(1, JOINT_ELBOW, MAX_SPEED, 0), loadSettings());
+    forgetTestSettings();
+}
+
+static void applying_settings_sets_the_pipes_joints_sides_and_speed(void)
+{
+    SavedSettings saved = useSettings(0, JOINT_ELBOW);
+    Settings chosen = settingsOf(1, JOINT_MIXED, MAX_SPEED, MAX_RESOLUTION);
+    applySettings(&chosen);
+    expectNumber("multiple pipes", 1, multiplePipes);
+    expectNumber("joint style (2 = mixed)", JOINT_MIXED, jointStyleSetting);
+    expectNumber("sides", 20, slices);
+    expectNear("milliseconds per step", 11.0, stepMs);
+    chosen = defaultSettings();
+    applySettings(&chosen);
+    expectNumber("sides back at the default", DEFAULT_SLICES, slices);
+    restoreSettings(saved);
+}
+
+static HWND openSettingsDialogHere(Settings *s)
+{
+    DialogTemplate t;
+    buildSettingsDialog(&t);
+    return CreateDialogIndirectParamA(GetModuleHandle(NULL), (LPCDLGTEMPLATEA)t.storage, NULL,
+                                      settingsDialogProc, (LPARAM)s);
+}
+
+static void controlText(HWND dlg, int id, char *text, int size)
+{
+    text[0] = 0;
+    GetWindowTextA(GetDlgItem(dlg, id), text, size);
+}
+
+static void the_settings_dialog_has_the_xp_setup_controls(void)
+{
+    Settings s = defaultSettings();
+    HWND dlg = openSettingsDialogHere(&s);
+    char text[64];
+    expect(dlg != NULL, "the dialog to be created from its template");
+    if (!dlg) return;
+    GetWindowTextA(dlg, text, sizeof text);
+    expectText("dialog title", "3D Pipes Setup", text);
+    controlText(dlg, ID_SINGLE, text, sizeof text);
+    expectText("first pipes choice", "&Single", text);
+    controlText(dlg, ID_MULTIPLE, text, sizeof text);
+    expectText("second pipes choice", "&Multiple", text);
+    expectNumber("joint types offered", 4, SendDlgItemMessageA(dlg, ID_JOINT_TYPE, CB_GETCOUNT, 0, 0));
+    SendDlgItemMessageA(dlg, ID_JOINT_TYPE, CB_GETLBTEXT, 3, (LPARAM)text);
+    expectText("last joint type", "Cycle", text);
+    expect(GetDlgItem(dlg, ID_SPEED) != NULL, "a speed slider");
+    expect(GetDlgItem(dlg, ID_RESOLUTION) != NULL, "a resolution slider");
+    controlText(dlg, IDOK, text, sizeof text);
+    expectText("confirm button", "OK", text);
+    controlText(dlg, IDCANCEL, text, sizeof text);
+    expectText("cancel button", "Cancel", text);
+    DestroyWindow(dlg);
+}
+
+static void the_settings_dialog_starts_from_the_current_settings(void)
+{
+    Settings s = settingsOf(1, JOINT_MIXED, 80, 150);
+    HWND dlg = openSettingsDialogHere(&s);
+    if (!dlg) { expect(0, "the dialog to be created"); return; }
+    expect(IsDlgButtonChecked(dlg, ID_MULTIPLE) == BST_CHECKED, "Multiple to be ticked");
+    expect(IsDlgButtonChecked(dlg, ID_SINGLE) == BST_UNCHECKED, "Single not to be ticked");
+    expectNumber("joint type shown (2 = mixed)", JOINT_MIXED, SendDlgItemMessageA(dlg, ID_JOINT_TYPE, CB_GETCURSEL, 0, 0));
+    expectNumber("speed slider", 80, GetScrollPos(GetDlgItem(dlg, ID_SPEED), SB_CTL));
+    expectNumber("resolution slider", 150, GetScrollPos(GetDlgItem(dlg, ID_RESOLUTION), SB_CTL));
+    DestroyWindow(dlg);
+}
+
+static void pressing_ok_takes_the_choices_from_the_dialog(void)
+{
+    Settings s = defaultSettings();
+    HWND dlg = openSettingsDialogHere(&s);
+    if (!dlg) { expect(0, "the dialog to be created"); return; }
+    CheckRadioButton(dlg, ID_SINGLE, ID_MULTIPLE, ID_MULTIPLE);
+    SendDlgItemMessageA(dlg, ID_JOINT_TYPE, CB_SETCURSEL, JOINT_BALL, 0);
+    SetScrollPos(GetDlgItem(dlg, ID_SPEED), SB_CTL, 12, FALSE);
+    SetScrollPos(GetDlgItem(dlg, ID_RESOLUTION), SB_CTL, 200, FALSE);
+    SendMessageA(dlg, WM_COMMAND, IDOK, 0);
+    expectSettings("after pressing OK", settingsOf(1, JOINT_BALL, 12, 200), s);
+    DestroyWindow(dlg);
+}
+
+static void pressing_cancel_leaves_the_settings_untouched(void)
+{
+    Settings s = defaultSettings();
+    HWND dlg = openSettingsDialogHere(&s);
+    if (!dlg) { expect(0, "the dialog to be created"); return; }
+    CheckRadioButton(dlg, ID_SINGLE, ID_MULTIPLE, ID_MULTIPLE);
+    SetScrollPos(GetDlgItem(dlg, ID_SPEED), SB_CTL, 99, FALSE);
+    SendMessageA(dlg, WM_COMMAND, IDCANCEL, 0);
+    expectSettings("after pressing Cancel", defaultSettings(), s);
+    DestroyWindow(dlg);
+}
+
+static void the_sliders_move_with_arrows_paging_and_dragging(void)
+{
+    HWND bar = CreateWindowA("SCROLLBAR", "", WS_POPUP | SBS_HORZ, 0, 0, 200, 20, NULL, NULL, GetModuleHandle(NULL), NULL);
+    if (!bar) { expect(0, "a slider to be created"); return; }
+    setSlider(bar, MAX_RESOLUTION, 100);
+    moveSlider(bar, SB_LINERIGHT);
+    expectNumber("after one arrow step right", 104, GetScrollPos(bar, SB_CTL));
+    moveSlider(bar, SB_PAGELEFT);
+    expectNumber("after one page left", 84, GetScrollPos(bar, SB_CTL));
+    moveSlider(bar, MAKEWPARAM(SB_THUMBTRACK, 190));
+    expectNumber("while dragging the thumb", 190, GetScrollPos(bar, SB_CTL));
+    moveSlider(bar, SB_PAGERIGHT);
+    expectNumber("paging past the end stops at the end", MAX_RESOLUTION, GetScrollPos(bar, SB_CTL));
+    moveSlider(bar, SB_LEFT);
+    expectNumber("after jumping to the start", 0, GetScrollPos(bar, SB_CTL));
+    moveSlider(bar, SB_LINELEFT);
+    expectNumber("stepping past the start stops at the start", 0, GetScrollPos(bar, SB_CTL));
+    DestroyWindow(bar);
 }
 
 static void no_arguments_open_the_windowed_viewer(void)
@@ -146,10 +382,20 @@ static void unknown_or_run_together_switches_open_the_windowed_viewer(void)
     expectNumber("mode for /x", MODE_WINDOWED, parsed("/x").mode);
 }
 
-static void slash_c_asks_for_the_configuration_screen(void)
+static void slash_c_asks_for_the_settings_dialog_with_an_optional_owner(void)
 {
     expectNumber("mode for /c", MODE_CONFIGURE, parsed("/c").mode);
+    expectNumber("owner for a bare /c", 0, (long long)(UINT_PTR)parsed("/c").ownerWindow);
     expectNumber("mode for /c:1234", MODE_CONFIGURE, parsed("/c:1234").mode);
+    expectNumber("owner from /c:1234", 1234, (long long)(UINT_PTR)parsed("/c:1234").ownerWindow);
+    expectNumber("owner from /c 5678", 5678, (long long)(UINT_PTR)parsed("/c 5678").ownerWindow);
+}
+
+static void opening_the_scr_file_with_no_arguments_opens_the_settings(void)
+{
+    expectNumber("mode for the .scr with no arguments", MODE_CONFIGURE, parsedAsScrFile("").mode);
+    expectNumber("mode for the .exe with no arguments", MODE_WINDOWED, parsed("").mode);
+    expectNumber("mode for the .scr with /s", MODE_FULLSCREEN, parsedAsScrFile("/s").mode);
 }
 
 static void slash_p_asks_for_the_preview_pane_inside_the_given_window(void)
@@ -158,27 +404,6 @@ static void slash_p_asks_for_the_preview_pane_inside_the_given_window(void)
     expectNumber("window handle from /p 1234", 1234, (long long)(UINT_PTR)parsed("/p 1234").previewParent);
     expectNumber("window handle from /p:5678", 5678, (long long)(UINT_PTR)parsed("/p:5678").previewParent);
     expectNumber("window handle from a bare /p", 0, (long long)(UINT_PTR)parsed("/p").previewParent);
-}
-
-typedef struct {
-    int multiple;
-    int joints;
-} SavedSettings;
-
-static SavedSettings useSettings(int multiple, int joints)
-{
-    SavedSettings saved;
-    saved.multiple = multiplePipes;
-    saved.joints = jointStyleSetting;
-    multiplePipes = multiple;
-    jointStyleSetting = joints;
-    return saved;
-}
-
-static void restoreSettings(SavedSettings saved)
-{
-    multiplePipes = saved.multiple;
-    jointStyleSetting = saved.joints;
 }
 
 static Scene *emptyScene(void)
@@ -1670,21 +1895,6 @@ static void the_screensaver_ignores_a_tiny_mouse_twitch_but_closes_on_a_real_mov
     stopPipes(&p);
 }
 
-static void the_configure_option_explains_that_there_is_nothing_to_set_up(void)
-{
-    Program p = startPipes("/c");
-    HWND box = waitForWindow(&p, "#32770");
-    DWORD code = 1;
-    expect(box != NULL, "a message box to appear");
-    if (box) {
-        expect(windowShowsText(box, "3D Pipes has no options to configure."), "the message to explain there are no options");
-        expect(clickButtonLabelled(box, "OK"), "the message box to have an OK button");
-        expect(finishesWithin(&p, 10000, &code), "pressing OK to end the program");
-        expectNumber("exit code", 0, code);
-    }
-    stopPipes(&p);
-}
-
 static void pumpMessagesFor(DWORD ms)
 {
     DWORD start = GetTickCount();
@@ -1848,10 +2058,10 @@ static void the_preview_pane_rests_between_steps_instead_of_spinning(void)
 
 static void the_main_loop_rests_until_the_next_step_or_dissolve_frame(void)
 {
-    expectNumber("rest right after a step (ms)", (long long)STEP_MS, restBeforeNextFrame(0.0, 0));
-    expectNumber("rest when a step is due", 0, restBeforeNextFrame(STEP_MS, 0));
+    expectNumber("rest right after a step (ms)", (long long)stepMs, restBeforeNextFrame(0.0, 0));
+    expectNumber("rest when a step is due", 0, restBeforeNextFrame(stepMs, 0));
     expectNumber("rest right after a step while dissolving (ms)", DISSOLVE_FRAME_MS, restBeforeNextFrame(0.0, 1));
-    expectNumber("rest when less than a millisecond is left", 0, restBeforeNextFrame(STEP_MS - 0.5, 0));
+    expectNumber("rest when less than a millisecond is left", 0, restBeforeNextFrame(stepMs - 0.5, 0));
 }
 
 static void a_preview_for_a_window_that_does_not_exist_exits_straight_away(void)
@@ -1861,6 +2071,129 @@ static void a_preview_for_a_window_that_does_not_exist_exits_straight_away(void)
     expect(finishesWithin(&p, 10000, &code), "the program to end by itself");
     expectNumber("exit code", 0, code);
     stopPipes(&p);
+}
+
+static HWND waitForSettingsDialog(Program *p)
+{
+    HWND dlg = waitForWindow(p, "#32770");
+    char title[64] = "";
+    if (dlg) GetWindowTextA(dlg, title, sizeof title);
+    return strcmp(title, "3D Pipes Setup") == 0 ? dlg : NULL;
+}
+
+static void the_configure_option_opens_the_setup_dialog_and_ok_saves_the_choices(void)
+{
+    Program p;
+    HWND dlg;
+    DWORD code = 1;
+    forgetTestSettings();
+    p = startPipes("/c");
+    dlg = waitForSettingsDialog(&p);
+    expect(dlg != NULL, "the 3D Pipes Setup dialog to appear");
+    if (dlg) {
+        Sleep(DIALOG_SETTLE_MS);
+        expect(windowShowsText(dlg, "Pipes") && windowShowsText(dlg, "Joint Type") &&
+               windowShowsText(dlg, "Speed") && windowShowsText(dlg, "Resolution"),
+               "the dialog to show the Pipes, Joint Type, Speed and Resolution groups");
+        SendMessageA(GetDlgItem(dlg, ID_SINGLE), BM_SETCHECK, BST_UNCHECKED, 0);
+        SendMessageA(GetDlgItem(dlg, ID_MULTIPLE), BM_SETCHECK, BST_CHECKED, 0);
+        SendMessageA(GetDlgItem(dlg, ID_JOINT_TYPE), CB_SETCURSEL, JOINT_CYCLE, 0);
+        SendMessageA(GetDlgItem(dlg, ID_SPEED), SBM_SETPOS, 90, TRUE);
+        SendMessageA(GetDlgItem(dlg, ID_RESOLUTION), SBM_SETPOS, 200, TRUE);
+        expect(clickButtonLabelled(dlg, "OK"), "the dialog to have an OK button");
+        expect(finishesWithin(&p, 10000, &code), "pressing OK to end the program");
+        expectNumber("exit code", 0, code);
+        expectSettings("saved by the dialog", settingsOf(1, JOINT_CYCLE, 90, 200), loadSettings());
+    }
+    stopPipes(&p);
+    forgetTestSettings();
+}
+
+static void cancelling_the_setup_dialog_saves_nothing(void)
+{
+    Program p;
+    HWND dlg;
+    Settings before = settingsOf(1, JOINT_MIXED, 40, 100);
+    forgetTestSettings();
+    saveSettings(&before);
+    p = startPipes("/c");
+    dlg = waitForSettingsDialog(&p);
+    expect(dlg != NULL, "the 3D Pipes Setup dialog to appear");
+    if (dlg) {
+        Sleep(DIALOG_SETTLE_MS);
+        expect(SendMessageA(GetDlgItem(dlg, ID_MULTIPLE), BM_GETCHECK, 0, 0) == BST_CHECKED,
+               "the dialog to show the saved choice of Multiple");
+        expectNumber("speed slider shown", 40, SendMessageA(GetDlgItem(dlg, ID_SPEED), SBM_GETPOS, 0, 0));
+        SendMessageA(GetDlgItem(dlg, ID_SPEED), SBM_SETPOS, 5, TRUE);
+        expect(clickButtonLabelled(dlg, "Cancel"), "the dialog to have a Cancel button");
+        expect(finishesWithin(&p, 10000, NULL), "pressing Cancel to end the program");
+        expectSettings("after cancelling", before, loadSettings());
+    }
+    stopPipes(&p);
+    forgetTestSettings();
+}
+
+static void the_setup_dialog_belongs_to_the_window_that_asked_for_it(void)
+{
+    HWND owner = openSettingsLikeWindow(300, 200);
+    char arguments[64];
+    Program p;
+    HWND dlg = NULL;
+    DWORD start;
+    snprintf(arguments, sizeof arguments, "/c:%llu", (unsigned long long)(UINT_PTR)owner);
+    p = startPipes(arguments);
+    start = GetTickCount();
+    while (!dlg && GetTickCount() - start < WINDOW_TIMEOUT_MS) {
+        pumpMessagesFor(50);
+        dlg = FindWindowA("#32770", "3D Pipes Setup");
+    }
+    expect(dlg != NULL, "the 3D Pipes Setup dialog to appear");
+    if (dlg) {
+        pumpMessagesFor(DIALOG_SETTLE_MS);
+        expect(GetWindow(dlg, GW_OWNER) == owner, "the dialog to be owned by the window given with /c:");
+        expect(clickButtonLabelled(dlg, "Cancel"), "the dialog to have a Cancel button");
+        expect(finishesWhilePumpingMessages(&p, 10000, NULL), "pressing Cancel to end the program");
+    }
+    stopPipes(&p);
+    DestroyWindow(owner);
+}
+
+static void double_clicking_the_scr_file_opens_the_setup_dialog(void)
+{
+    char scrPath[MAX_PATH];
+    Program p;
+    HWND dlg;
+    snprintf(scrPath, sizeof scrPath, OUTPUT_DIR "\\pipes-test.scr");
+    expect(CopyFileA(pipesExe, scrPath, FALSE), "the program to be copied as a .scr file");
+    {
+        char saved[MAX_PATH];
+        snprintf(saved, sizeof saved, "%s", pipesExe);
+        snprintf(pipesExe, sizeof pipesExe, "%s", scrPath);
+        p = startPipes("");
+        snprintf(pipesExe, sizeof pipesExe, "%s", saved);
+    }
+    dlg = waitForSettingsDialog(&p);
+    expect(dlg != NULL, "running the .scr with no arguments to open the setup dialog");
+    if (dlg) {
+        expect(clickButtonLabelled(dlg, "Cancel"), "the dialog to have a Cancel button");
+        expect(finishesWithin(&p, 10000, NULL), "pressing Cancel to end the program");
+    }
+    stopPipes(&p);
+}
+
+static void saved_settings_change_what_the_screensaver_draws(void)
+{
+    DWORD code = 1;
+    int finished;
+    Settings busy = settingsOf(1, JOINT_MIXED, DEFAULT_SPEED, MAX_RESOLUTION);
+    forgetTestSettings();
+    runShotProgram("/shot " OUTPUT_DIR "\\shot-defaults.bmp 140 7", &code, &finished);
+    saveSettings(&busy);
+    runShotProgram("/shot " OUTPUT_DIR "\\shot-multiple-mixed.bmp 140 7", &code, &finished);
+    expect(finished && code == 0, "the run with saved settings to succeed");
+    expect(!filesAreIdentical(OUTPUT_DIR "\\shot-defaults.bmp", OUTPUT_DIR "\\shot-multiple-mixed.bmp"),
+           "Multiple pipes, mixed joints and 20 sides to give a different picture from the defaults");
+    forgetTestSettings();
 }
 
 static void a_preview_without_a_window_handle_exits_straight_away(void)
@@ -1876,6 +2209,8 @@ int main(int argc, char **argv)
 {
     if (argc > 1) snprintf(pipesExe, sizeof pipesExe, "%s", argv[1]);
     CreateDirectoryA(OUTPUT_DIR, NULL);
+    SetEnvironmentVariableA(SETTINGS_KEY_VARIABLE, TEST_SETTINGS_KEY);
+    forgetTestSettings();
     removeOldOutputs();
     setvbuf(stdout, NULL, _IONBF, 0);
     printf("3D Pipes test suite (program under test: %s)\n", pipesExe);
@@ -1887,7 +2222,8 @@ int main(int argc, char **argv)
     run(slash_shot_reads_the_file_name_step_count_and_seed);
     run(slash_shot_uses_sensible_defaults_when_details_are_missing);
     run(unknown_or_run_together_switches_open_the_windowed_viewer);
-    run(slash_c_asks_for_the_configuration_screen);
+    run(slash_c_asks_for_the_settings_dialog_with_an_optional_owner);
+    run(opening_the_scr_file_with_no_arguments_opens_the_settings);
     run(slash_p_asks_for_the_preview_pane_inside_the_given_window);
 
     heading("Growing pipes");
@@ -1974,7 +2310,6 @@ int main(int argc, char **argv)
     run(the_screensaver_closes_when_any_key_is_pressed);
     run(the_screensaver_closes_when_a_mouse_button_is_pressed);
     run(the_screensaver_ignores_a_tiny_mouse_twitch_but_closes_on_a_real_move);
-    run(the_configure_option_explains_that_there_is_nothing_to_set_up);
 
     heading("Preview pane");
     run(a_preview_sized_picture_still_shows_plenty_of_pipes);
@@ -1986,6 +2321,25 @@ int main(int argc, char **argv)
     run(a_preview_for_a_window_that_does_not_exist_exits_straight_away);
     run(a_preview_without_a_window_handle_exits_straight_away);
 
+    heading("Settings");
+    run(the_resolution_slider_gives_eight_twelve_sixteen_or_twenty_sides);
+    run(the_speed_slider_runs_from_a_slow_crawl_to_fast);
+    run(with_nothing_saved_the_original_defaults_apply);
+    run(saved_settings_come_back_exactly);
+    run(nonsense_in_the_registry_falls_back_to_safe_values);
+    run(applying_settings_sets_the_pipes_joints_sides_and_speed);
+    run(the_settings_dialog_has_the_xp_setup_controls);
+    run(the_settings_dialog_starts_from_the_current_settings);
+    run(pressing_ok_takes_the_choices_from_the_dialog);
+    run(pressing_cancel_leaves_the_settings_untouched);
+    run(the_sliders_move_with_arrows_paging_and_dragging);
+    run(the_configure_option_opens_the_setup_dialog_and_ok_saves_the_choices);
+    run(cancelling_the_setup_dialog_saves_nothing);
+    run(the_setup_dialog_belongs_to_the_window_that_asked_for_it);
+    run(double_clicking_the_scr_file_opens_the_setup_dialog);
+    run(saved_settings_change_what_the_screensaver_draws);
+
+    forgetTestSettings();
     printf("\n%d passed, %d failed\n", testsPassed, testsFailed);
     return testsFailed == 0 ? 0 : 1;
 }

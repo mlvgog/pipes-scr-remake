@@ -6,6 +6,10 @@
 #include <string.h>
 #include <time.h>
 
+#ifdef _MSC_VER
+#pragma comment(lib, "advapi32.lib")
+#endif
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -15,7 +19,14 @@
 #define ELBOW_R     PIPE_R
 #define SHORT_PIPE  (CELL - 2.0f * PIPE_R)
 
-#define STEP_MS     33.0
+#define SLOWEST_STEP_MS  100.0
+#define FASTEST_STEP_MS  11.0
+#define MAX_SPEED        100
+#define DEFAULT_SPEED    50
+#define MAX_RESOLUTION   200
+
+#define SETTINGS_KEY           "Software\\pipes-scr-remake"
+#define SETTINGS_KEY_VARIABLE  "PIPES_SETTINGS_KEY"
 
 #define NORMAL_PIPES_PER_SCENE  5
 #define MULTIPLE_PIPES_FACTOR   1.5
@@ -130,6 +141,7 @@ typedef struct {
     int        hasShotSeed;
     unsigned   shotSeed;
     HWND       previewParent;
+    HWND       ownerWindow;
 } LaunchOptions;
 
 static const int DV[6][3] = {
@@ -154,6 +166,104 @@ static int    haveMouseStart;
 static int    multiplePipes = 0;
 static int    jointStyleSetting = JOINT_ELBOW;
 static int    slices = DEFAULT_SLICES;
+static double stepMs = 33.0;
+
+typedef struct {
+    int multiplePipes;
+    int jointStyle;
+    int speed;
+    int resolution;
+} Settings;
+
+static const char *const JOINT_NAMES[] = { "Elbow", "Ball", "Mixed", "Cycle" };
+
+static int clampInt(int value, int low, int high)
+{
+    return value < low ? low : value > high ? high : value;
+}
+
+static Settings defaultSettings(void)
+{
+    Settings s;
+    s.multiplePipes = 0;
+    s.jointStyle = JOINT_ELBOW;
+    s.speed = DEFAULT_SPEED;
+    s.resolution = 0;
+    return s;
+}
+
+static int slicesForResolution(int resolution)
+{
+    int level = (int)(clampInt(resolution, 0, MAX_RESOLUTION) / 100.0 * 4.0 / 2.0001);
+    return (level + 2) * 4;
+}
+
+static double stepMsForSpeed(int speed)
+{
+    double position = clampInt(speed, 0, MAX_SPEED) / (double)MAX_SPEED;
+    return SLOWEST_STEP_MS * pow(FASTEST_STEP_MS / SLOWEST_STEP_MS, position);
+}
+
+static void applySettings(const Settings *s)
+{
+    multiplePipes = s->multiplePipes != 0;
+    jointStyleSetting = clampInt(s->jointStyle, JOINT_ELBOW, JOINT_CYCLE);
+    slices = slicesForResolution(s->resolution);
+    stepMs = stepMsForSpeed(s->speed);
+}
+
+static void settingsKeyPath(char *path, DWORD size)
+{
+    DWORD n = GetEnvironmentVariableA(SETTINGS_KEY_VARIABLE, path, size);
+    if (n == 0 || n >= size) snprintf(path, size, "%s", SETTINGS_KEY);
+}
+
+static int readNumber(HKEY key, const char *name, int fallback)
+{
+    DWORD value = 0, size = sizeof value, type = 0;
+    if (RegQueryValueExA(key, name, NULL, &type, (BYTE *)&value, &size) != ERROR_SUCCESS || type != REG_DWORD)
+        return fallback;
+    return (int)value;
+}
+
+static Settings loadSettings(void)
+{
+    Settings s = defaultSettings();
+    char path[256];
+    HKEY key;
+    int joint;
+    settingsKeyPath(path, sizeof path);
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, path, 0, KEY_READ, &key) != ERROR_SUCCESS) return s;
+    s.multiplePipes = readNumber(key, "MultiplePipes", s.multiplePipes) != 0;
+    joint = readNumber(key, "JointType", s.jointStyle);
+    s.jointStyle = (joint >= JOINT_ELBOW && joint <= JOINT_CYCLE) ? joint : JOINT_ELBOW;
+    s.speed = clampInt(readNumber(key, "Speed", s.speed), 0, MAX_SPEED);
+    s.resolution = clampInt(readNumber(key, "Resolution", s.resolution), 0, MAX_RESOLUTION);
+    RegCloseKey(key);
+    return s;
+}
+
+static int writeNumber(HKEY key, const char *name, int number)
+{
+    DWORD value = (DWORD)number;
+    return RegSetValueExA(key, name, 0, REG_DWORD, (const BYTE *)&value, sizeof value) == ERROR_SUCCESS;
+}
+
+static int saveSettings(const Settings *s)
+{
+    char path[256];
+    HKEY key;
+    int ok;
+    settingsKeyPath(path, sizeof path);
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, path, 0, NULL, 0, KEY_WRITE, NULL, &key, NULL) != ERROR_SUCCESS)
+        return 0;
+    ok = writeNumber(key, "MultiplePipes", s->multiplePipes) &
+         writeNumber(key, "JointType", s->jointStyle) &
+         writeNumber(key, "Speed", s->speed) &
+         writeNumber(key, "Resolution", s->resolution);
+    RegCloseKey(key);
+    return ok;
+}
 
 static const float TEA_MATERIALS[NUM_TEA_MATERIALS][10] = {
     { .0215f, .1745f, .0215f, .07568f, .61424f, .07568f, .633f, .727811f, .633f, .6f },
@@ -695,7 +805,7 @@ static int anySceneDissolving(void)
 
 static DWORD restBeforeNextFrame(double msSinceLastStep, int dissolving)
 {
-    double rest = STEP_MS - msSinceLastStep;
+    double rest = stepMs - msSinceLastStep;
     if (dissolving && rest > DISSOLVE_FRAME_MS) rest = DISSOLVE_FRAME_MS;
     return rest < 1.0 ? 0 : (DWORD)rest;
 }
@@ -1024,7 +1134,14 @@ static void parseShotArguments(const char *rest, LaunchOptions *out)
     }
 }
 
-static void parseCommandLine(const char *cmdLine, LaunchOptions *out)
+static HWND windowNumberAfter(const char *a)
+{
+    char word[32];
+    readWord(*a == ':' ? a + 1 : a, word, sizeof word);
+    return (HWND)(UINT_PTR)_strtoui64(word, NULL, 10);
+}
+
+static void parseCommandLine(const char *cmdLine, int runningAsScrFile, LaunchOptions *out)
 {
     const char *a = skipBlanks(cmdLine ? cmdLine : "");
     memset(out, 0, sizeof *out);
@@ -1039,11 +1156,12 @@ static void parseCommandLine(const char *cmdLine, LaunchOptions *out)
         out->mode = MODE_FULLSCREEN;
     } else if (switchIs(a, "/c")) {
         out->mode = MODE_CONFIGURE;
+        out->ownerWindow = windowNumberAfter(a + 2);
     } else if (switchIs(a, "/p")) {
-        char word[32];
         out->mode = MODE_PREVIEW;
-        readWord(*(a + 2) == ':' ? a + 3 : a + 2, word, sizeof word);
-        out->previewParent = (HWND)(UINT_PTR)_strtoui64(word, NULL, 10);
+        out->previewParent = windowNumberAfter(a + 2);
+    } else if (!*a && runningAsScrFile) {
+        out->mode = MODE_CONFIGURE;
     }
 }
 
@@ -1220,9 +1338,9 @@ static int runInteractive(void)
         acc += (double)(now.QuadPart - last.QuadPart) * 1000.0 / (double)freq.QuadPart;
         last = now;
         if (acc > 500.0) acc = 500.0;
-        while (acc >= STEP_MS) {
+        while (acc >= stepMs) {
             tickAll();
-            acc -= STEP_MS;
+            acc -= stepMs;
         }
 
         drawAll();
@@ -1234,19 +1352,199 @@ static int runInteractive(void)
     }
 }
 
+enum { ID_SINGLE = 101, ID_MULTIPLE, ID_JOINT_TYPE, ID_SPEED, ID_RESOLUTION };
+
+typedef struct {
+    DWORD storage[1024];
+    int   used;
+    int   items;
+} DialogTemplate;
+
+static void templateWord(DialogTemplate *t, WORD w)
+{
+    ((WORD *)t->storage)[t->used++] = w;
+}
+
+static void templateLong(DialogTemplate *t, DWORD d)
+{
+    templateWord(t, LOWORD(d));
+    templateWord(t, HIWORD(d));
+}
+
+static void templateText(DialogTemplate *t, const char *text)
+{
+    while (*text) templateWord(t, (WORD)(unsigned char)*text++);
+    templateWord(t, 0);
+}
+
+static void templateAlign(DialogTemplate *t)
+{
+    if (t->used & 1) templateWord(t, 0);
+}
+
+static void templateBegin(DialogTemplate *t, const char *title, short width, short height)
+{
+    memset(t, 0, sizeof *t);
+    templateLong(t, DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU);
+    templateLong(t, 0);
+    templateWord(t, 0);
+    templateWord(t, 0);
+    templateWord(t, 0);
+    templateWord(t, (WORD)width);
+    templateWord(t, (WORD)height);
+    templateWord(t, 0);
+    templateWord(t, 0);
+    templateText(t, title);
+    templateWord(t, 8);
+    templateText(t, "MS Shell Dlg");
+}
+
+static void templateControl(DialogTemplate *t, WORD controlClass, const char *text, WORD id,
+                            DWORD style, short x, short y, short width, short height)
+{
+    templateAlign(t);
+    templateLong(t, style | WS_CHILD | WS_VISIBLE);
+    templateLong(t, 0);
+    templateWord(t, (WORD)x);
+    templateWord(t, (WORD)y);
+    templateWord(t, (WORD)width);
+    templateWord(t, (WORD)height);
+    templateWord(t, id);
+    templateWord(t, 0xFFFF);
+    templateWord(t, controlClass);
+    templateText(t, text);
+    templateWord(t, 0);
+    t->items++;
+    ((WORD *)t->storage)[4] = (WORD)t->items;
+}
+
+#define BUTTON_CLASS    0x0080
+#define STATIC_CLASS    0x0082
+#define SCROLLBAR_CLASS 0x0084
+#define COMBOBOX_CLASS  0x0085
+
+static void buildSettingsDialog(DialogTemplate *t)
+{
+    templateBegin(t, "3D Pipes Setup", 212, 150);
+    templateControl(t, BUTTON_CLASS, "Pipes", 0xFFFF, BS_GROUPBOX, 7, 7, 95, 42);
+    templateControl(t, BUTTON_CLASS, "&Single", ID_SINGLE, BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 15, 20, 80, 10);
+    templateControl(t, BUTTON_CLASS, "&Multiple", ID_MULTIPLE, BS_AUTORADIOBUTTON, 15, 33, 80, 10);
+    templateControl(t, BUTTON_CLASS, "Joint Type", 0xFFFF, BS_GROUPBOX, 110, 7, 95, 42);
+    templateControl(t, COMBOBOX_CLASS, "", ID_JOINT_TYPE, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP | WS_GROUP, 118, 22, 79, 70);
+    templateControl(t, BUTTON_CLASS, "Speed", 0xFFFF, BS_GROUPBOX, 7, 54, 198, 30);
+    templateControl(t, STATIC_CLASS, "Slow", 0xFFFF, SS_LEFT, 13, 67, 22, 8);
+    templateControl(t, SCROLLBAR_CLASS, "", ID_SPEED, SBS_HORZ | WS_TABSTOP | WS_GROUP, 37, 66, 136, 10);
+    templateControl(t, STATIC_CLASS, "Fast", 0xFFFF, SS_RIGHT, 177, 67, 22, 8);
+    templateControl(t, BUTTON_CLASS, "Resolution", 0xFFFF, BS_GROUPBOX, 7, 88, 198, 30);
+    templateControl(t, STATIC_CLASS, "Min", 0xFFFF, SS_LEFT, 13, 101, 22, 8);
+    templateControl(t, SCROLLBAR_CLASS, "", ID_RESOLUTION, SBS_HORZ | WS_TABSTOP | WS_GROUP, 37, 100, 136, 10);
+    templateControl(t, STATIC_CLASS, "Max", 0xFFFF, SS_RIGHT, 177, 101, 22, 8);
+    templateControl(t, BUTTON_CLASS, "OK", IDOK, BS_DEFPUSHBUTTON | WS_TABSTOP | WS_GROUP, 99, 128, 50, 14);
+    templateControl(t, BUTTON_CLASS, "Cancel", IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP, 155, 128, 50, 14);
+}
+
+static void setSlider(HWND bar, int highest, int position)
+{
+    SetScrollRange(bar, SB_CTL, 0, highest, FALSE);
+    SetScrollPos(bar, SB_CTL, clampInt(position, 0, highest), TRUE);
+}
+
+static void moveSlider(HWND bar, WPARAM request)
+{
+    int low, high, pos = GetScrollPos(bar, SB_CTL), line, page;
+    GetScrollRange(bar, SB_CTL, &low, &high);
+    line = (high - low) / 50 > 0 ? (high - low) / 50 : 1;
+    page = (high - low) / 10 > 0 ? (high - low) / 10 : 1;
+    switch (LOWORD(request)) {
+    case SB_LINELEFT:      pos -= line; break;
+    case SB_LINERIGHT:     pos += line; break;
+    case SB_PAGELEFT:      pos -= page; break;
+    case SB_PAGERIGHT:     pos += page; break;
+    case SB_THUMBTRACK:
+    case SB_THUMBPOSITION: pos = HIWORD(request); break;
+    case SB_LEFT:          pos = low; break;
+    case SB_RIGHT:         pos = high; break;
+    default: return;
+    }
+    SetScrollPos(bar, SB_CTL, clampInt(pos, low, high), TRUE);
+}
+
+static void showSettingsInDialog(HWND dlg, const Settings *s)
+{
+    int i;
+    CheckRadioButton(dlg, ID_SINGLE, ID_MULTIPLE, s->multiplePipes ? ID_MULTIPLE : ID_SINGLE);
+    for (i = JOINT_ELBOW; i <= JOINT_CYCLE; i++)
+        SendDlgItemMessageA(dlg, ID_JOINT_TYPE, CB_ADDSTRING, 0, (LPARAM)JOINT_NAMES[i]);
+    SendDlgItemMessageA(dlg, ID_JOINT_TYPE, CB_SETCURSEL, (WPARAM)s->jointStyle, 0);
+    setSlider(GetDlgItem(dlg, ID_SPEED), MAX_SPEED, s->speed);
+    setSlider(GetDlgItem(dlg, ID_RESOLUTION), MAX_RESOLUTION, s->resolution);
+}
+
+static void readSettingsFromDialog(HWND dlg, Settings *s)
+{
+    LRESULT joint = SendDlgItemMessageA(dlg, ID_JOINT_TYPE, CB_GETCURSEL, 0, 0);
+    s->multiplePipes = IsDlgButtonChecked(dlg, ID_MULTIPLE) == BST_CHECKED;
+    s->jointStyle = (joint >= JOINT_ELBOW && joint <= JOINT_CYCLE) ? (int)joint : JOINT_ELBOW;
+    s->speed = GetScrollPos(GetDlgItem(dlg, ID_SPEED), SB_CTL);
+    s->resolution = GetScrollPos(GetDlgItem(dlg, ID_RESOLUTION), SB_CTL);
+}
+
+static INT_PTR CALLBACK settingsDialogProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_INITDIALOG:
+        SetWindowLongPtrA(dlg, DWLP_USER, lp);
+        showSettingsInDialog(dlg, (const Settings *)lp);
+        return TRUE;
+    case WM_HSCROLL:
+        moveSlider((HWND)lp, wp);
+        return TRUE;
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDOK) {
+            readSettingsFromDialog(dlg, (Settings *)GetWindowLongPtrA(dlg, DWLP_USER));
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDCANCEL) {
+            EndDialog(dlg, IDCANCEL);
+            return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+static int runSettingsDialog(HWND owner, Settings *s)
+{
+    DialogTemplate t;
+    buildSettingsDialog(&t);
+    if (owner && !IsWindow(owner)) owner = NULL;
+    return DialogBoxIndirectParamA(GetModuleHandle(NULL), (LPCDLGTEMPLATEA)t.storage, owner,
+                                   settingsDialogProc, (LPARAM)s) == IDOK;
+}
+
+static int runningAsScrFile(void)
+{
+    char path[MAX_PATH];
+    DWORD n = GetModuleFileNameA(NULL, path, sizeof path);
+    return n > 4 && n < sizeof path && _stricmp(path + n - 4, ".scr") == 0;
+}
+
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
 {
     LaunchOptions options;
+    Settings settings;
     int result;
 
     (void)hPrev; (void)nShow;
 
-    parseCommandLine(cmdLine, &options);
+    parseCommandLine(cmdLine, runningAsScrFile(), &options);
+    settings = loadSettings();
     if (options.mode == MODE_CONFIGURE) {
-        MessageBoxA(NULL, "3D Pipes has no options to configure.",
-                    WINDOW_TITLE, MB_OK | MB_ICONINFORMATION);
+        if (runSettingsDialog(options.ownerWindow, &settings)) saveSettings(&settings);
         return 0;
     }
+    applySettings(&settings);
     if (options.mode == MODE_PREVIEW) {
         if (!options.previewParent || !IsWindow(options.previewParent)) return 0;
         previewing = 1;
