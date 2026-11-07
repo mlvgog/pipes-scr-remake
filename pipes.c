@@ -16,13 +16,21 @@
 #define BALL_R      0.44f
 #define CAP_R       0.38f
 
-#define NUM_PIPES   4
 #define STEP_MS     45.0
-#define P_STRAIGHT  0.55f
-#define P_BALL      0.25f
 
-#define DEATHS_RESET 12
-#define HOLD_MS      1600
+#define NORMAL_PIPES_PER_SCENE  5
+#define MULTIPLE_PIPES_FACTOR   1.5
+#define MIN_PIPES_AT_ONCE       2
+#define MAX_PIPES_AT_ONCE       4
+#define MAX_WEIGHT_STRAIGHT     100
+#define LONG_RUNNER_ONE_IN      20
+#define BALL_JOINT_ONE_IN       3
+#define CHASE_SCENE_ONE_IN      5
+#define SCENE_TURN_DEGREES      9.73156f
+
+#define DISSOLVE_MS                         1700
+#define DISSOLVE_SQUARES_ACROSS_SHORT_SIDE  32
+#define MAX_DISSOLVE_SQUARES                16384
 
 #define FOV_Y       34.0
 
@@ -47,6 +55,11 @@
 #define MOUSE_EXIT_SLOP    4
 
 enum { PRIM_CYL, PRIM_SPH, PRIM_ELB };
+enum { JOINT_ELBOW, JOINT_BALL, JOINT_MIXED, JOINT_CYCLE };
+enum { PIPE_ACTIVE, PIPE_STUCK, PIPE_OUT_OF_NODES };
+enum { SCENE_GROWING, SCENE_FINISHED, SCENE_DISSOLVING };
+
+#define NO_DIRECTION (-1)
 
 typedef struct {
     int   type;
@@ -58,10 +71,13 @@ typedef struct {
 } Prim;
 
 typedef struct {
-    int   alive;
+    int   state;
     int   x, y, z;
     int   dir;
-    int   hasDir;
+    int   weightStraight;
+    int   followsLead;
+    int   startsFarAway;
+    int   retired;
     int   lastCyl;
     float col[3];
 } Pipe;
@@ -73,10 +89,22 @@ typedef struct {
     unsigned char grid[MAXX][MAXY][MAXZ];
     Prim   prims[MAX_PRIMS];
     int    nPrims;
-    Pipe   pipes[NUM_PIPES];
-    int    deaths;
-    int    holding;
-    ULONGLONG holdStart;
+    Pipe   pipes[MAX_PIPES_AT_ONCE];
+    int    nPipes;
+    int    lead;
+    int    pipesStarted;
+    int    pipeBudget;
+    int    chase;
+    int    jointStyle;
+    int    phase;
+    float  rotation;
+    float  nextRotation;
+    ULONGLONG dissolveStart;
+    int    squareSize;
+    int    squaresAcross;
+    int    squareCount;
+    int    dissolveOrder[MAX_DISSOLVE_SQUARES];
+    unsigned char squareCleared[MAX_DISSOLVE_SQUARES];
 } Scene;
 
 typedef enum {
@@ -111,6 +139,9 @@ static HDC    hdc;
 static HGLRC  hrc;
 static POINT  mouseStart;
 static int    haveMouseStart;
+
+static int    multiplePipes = 0;
+static int    jointStyleSetting = JOINT_ELBOW;
 
 static float frand(void) { return (float)rand() / (float)RAND_MAX; }
 
@@ -205,15 +236,25 @@ static void nodeWorld(const Scene *s, int x, int y, int z, float *w)
     w[2] = (z - (s->NZ - 1) * 0.5f) * CELL;
 }
 
-static void scheduleReset(Scene *s)
+static int randomBelow(int n)
 {
-    if (!s->holding) { s->holding = 1; s->holdStart = GetTickCount64(); }
+    return rand() % n;
+}
+
+static int randomBetween(int low, int high)
+{
+    return low + rand() % (high - low + 1);
+}
+
+static void finishScene(Scene *s)
+{
+    if (s->phase == SCENE_GROWING) s->phase = SCENE_FINISHED;
 }
 
 static int addPrim(Scene *s, int type, const float *col)
 {
     Prim *p;
-    if (s->nPrims >= MAX_PRIMS) { scheduleReset(s); return -1; }
+    if (s->nPrims >= MAX_PRIMS) { finishScene(s); return -1; }
     p = &s->prims[s->nPrims];
     memset(p, 0, sizeof *p);
     p->type = type;
@@ -253,74 +294,168 @@ static int inBounds(const Scene *s, int x, int y, int z)
     return x >= 0 && x < s->NX && y >= 0 && y < s->NY && z >= 0 && z < s->NZ;
 }
 
-static int spawnPipe(Scene *s, Pipe *p)
+static int isFree(const Scene *s, int x, int y, int z)
 {
-    int tries;
-    for (tries = 0; tries < 400; tries++) {
-        int x = rand() % s->NX, y = rand() % s->NY, z = rand() % s->NZ;
-        int d, free_nbr = 0;
-        if (s->grid[x][y][z]) continue;
-        for (d = 0; d < 6; d++) {
-            int nx = x + DV[d][0], ny = y + DV[d][1], nz = z + DV[d][2];
-            if (inBounds(s, nx, ny, nz) && !s->grid[nx][ny][nz]) { free_nbr = 1; break; }
-        }
-        if (!free_nbr) continue;
-        memset(p, 0, sizeof *p);
-        p->alive = 1;
-        p->x = x; p->y = y; p->z = z;
-        p->hasDir = 0;
-        p->lastCyl = -1;
-        randomColor(p->col);
-        s->grid[x][y][z] = 1;
-        {
-            float w[3];
-            nodeWorld(s, x, y, z, w);
-            addSph(s, w, CAP_R, p->col);
-        }
-        return 1;
+    return inBounds(s, x, y, z) && !s->grid[x][y][z];
+}
+
+static int isFreeToward(const Scene *s, const Pipe *p, int d)
+{
+    return isFree(s, p->x + DV[d][0], p->y + DV[d][1], p->z + DV[d][2]);
+}
+
+static int chooseWeightedDirection(const Scene *s, const Pipe *p)
+{
+    int turns[6], nTurns = 0, weight = p->weightStraight, d, choice;
+    if (!isFreeToward(s, p, p->dir)) weight = 0;
+    else if (weight >= MAX_WEIGHT_STRAIGHT) return p->dir;
+    for (d = 0; d < 6; d++)
+        if (d != p->dir && isFreeToward(s, p, d)) turns[nTurns++] = d;
+    if (weight + nTurns == 0) return NO_DIRECTION;
+    choice = randomBelow(weight + nTurns);
+    return choice < weight ? p->dir : turns[choice - weight];
+}
+
+static int chooseDirectionTowards(const Scene *s, const Pipe *p, const Pipe *target)
+{
+    int delta[3], options[6], nOptions = 0, d;
+    delta[0] = target->x - p->x;
+    delta[1] = target->y - p->y;
+    delta[2] = target->z - p->z;
+    if (!delta[0] && !delta[1] && !delta[2]) return chooseWeightedDirection(s, p);
+    for (d = 0; d < 6; d++) {
+        int along = delta[d / 2];
+        int towards = (d % 2 == 0) ? along > 0 : along < 0;
+        if (towards && isFreeToward(s, p, d)) options[nOptions++] = d;
     }
+    if (nOptions == 0)
+        for (d = 0; d < 6; d++)
+            if (isFreeToward(s, p, d)) options[nOptions++] = d;
+    if (nOptions == 0) return NO_DIRECTION;
+    return options[randomBelow(nOptions)];
+}
+
+static int chooseDirection(Scene *s, Pipe *p)
+{
+    const Pipe *lead = s->lead >= 0 ? &s->pipes[s->lead] : NULL;
+    int d;
+    if (p->followsLead && lead && lead != p) d = chooseDirectionTowards(s, p, lead);
+    else d = chooseWeightedDirection(s, p);
+    if (d != NO_DIRECTION) s->grid[p->x + DV[d][0]][p->y + DV[d][1]][p->z + DV[d][2]] = 1;
+    return d;
+}
+
+static int nextJointStyle(int style)
+{
+    if (style == JOINT_MIXED) return JOINT_ELBOW;
+    if (style == JOINT_ELBOW) return JOINT_BALL;
+    return JOINT_MIXED;
+}
+
+static int turnGetsBallJoint(const Scene *s)
+{
+    if (s->jointStyle == JOINT_ELBOW) return 0;
+    if (s->jointStyle == JOINT_BALL) return 1;
+    return randomBelow(BALL_JOINT_ONE_IN) == 0;
+}
+
+static int findRandomFreeNode(const Scene *s, int *pos)
+{
+    int tries, limit = 2 * s->NX * s->NY * s->NZ, x, y, z;
+    for (tries = 0; tries < limit; tries++) {
+        x = randomBelow(s->NX);
+        y = randomBelow(s->NY);
+        z = randomBelow(s->NZ);
+        if (!s->grid[x][y][z]) { pos[0] = x; pos[1] = y; pos[2] = z; return 1; }
+    }
+    for (x = 0; x < s->NX; x++)
+        for (y = 0; y < s->NY; y++)
+            for (z = 0; z < s->NZ; z++)
+                if (!s->grid[x][y][z]) { pos[0] = x; pos[1] = y; pos[2] = z; return 1; }
     return 0;
 }
 
-static void killPipe(Scene *s, Pipe *p)
+static int freeNodesAtDistance(const Scene *s, const int *centre, int r, int wanted, int *pos)
 {
-    float w[3];
-    nodeWorld(s, p->x, p->y, p->z, w);
-    addSph(s, w, CAP_R, p->col);
-    p->alive = 0;
-    s->deaths++;
-    if (s->deaths >= DEATHS_RESET) { scheduleReset(s); return; }
-    if (!spawnPipe(s, p)) scheduleReset(s);
+    int x, y, z, count = 0;
+    for (x = centre[0] - r; x <= centre[0] + r; x++)
+        for (y = centre[1] - r; y <= centre[1] + r; y++)
+            for (z = centre[2] - r; z <= centre[2] + r; z++) {
+                int dist = abs(x - centre[0]);
+                if (abs(y - centre[1]) > dist) dist = abs(y - centre[1]);
+                if (abs(z - centre[2]) > dist) dist = abs(z - centre[2]);
+                if (dist != r || !isFree(s, x, y, z)) continue;
+                if (count == wanted) { pos[0] = x; pos[1] = y; pos[2] = z; }
+                count++;
+            }
+    return count;
 }
 
-static void stepPipe(Scene *s, Pipe *p)
+static int findFreeNodeFarFrom(const Scene *s, const Pipe *p, int *pos)
 {
-    int cand[6], nc = 0, d;
+    int corner[3], r, found, reach = (s->NX > s->NY ? s->NX : s->NY) / 3;
+    corner[0] = p->x >= s->NX / 2 ? 0 : s->NX - 1;
+    corner[1] = p->y >= s->NY / 2 ? 0 : s->NY - 1;
+    corner[2] = p->z >= s->NZ / 2 ? 0 : s->NZ - 1;
+    for (r = 0; r <= reach; r++) {
+        found = freeNodesAtDistance(s, corner, r, -1, pos);
+        if (found) {
+            freeNodesAtDistance(s, corner, r, randomBelow(found), pos);
+            return 1;
+        }
+    }
+    return findRandomFreeNode(s, pos);
+}
+
+static void movePipe(Pipe *p, int d)
+{
+    p->dir = d;
+    p->x += DV[d][0];
+    p->y += DV[d][1];
+    p->z += DV[d][2];
+}
+
+static int startPipe(Scene *s, Pipe *p)
+{
+    int pos[3], found, d;
+    float w[3];
+    found = p->startsFarAway ? findFreeNodeFarFrom(s, p, pos) : findRandomFreeNode(s, pos);
+    if (!found) { p->state = PIPE_OUT_OF_NODES; return 0; }
+    p->x = pos[0]; p->y = pos[1]; p->z = pos[2];
+    s->grid[p->x][p->y][p->z] = 1;
+    p->lastCyl = -1;
+    randomColor(p->col);
+    p->dir = randomBelow(6);
+    d = chooseDirection(s, p);
+    nodeWorld(s, p->x, p->y, p->z, w);
+    addSph(s, w, CAP_R, p->col);
+    if (d == NO_DIRECTION) { p->state = PIPE_STUCK; return 1; }
+    p->state = PIPE_ACTIVE;
+    p->lastCyl = addCyl(s, w, d, CELL, p->col);
+    movePipe(p, d);
+    return 1;
+}
+
+static void growPipe(Scene *s, Pipe *p)
+{
+    int d;
     float w[3];
 
-    for (d = 0; d < 6; d++) {
-        int nx, ny, nz;
-        if (p->hasDir && d == (p->dir ^ 1)) continue;
-        nx = p->x + DV[d][0]; ny = p->y + DV[d][1]; nz = p->z + DV[d][2];
-        if (inBounds(s, nx, ny, nz) && !s->grid[nx][ny][nz]) cand[nc++] = d;
-    }
-    if (nc == 0) { killPipe(s, p); return; }
+    if (p->state == PIPE_OUT_OF_NODES) { p->state = PIPE_STUCK; return; }
+    if (p->state != PIPE_ACTIVE) return;
 
-    d = -1;
-    if (p->hasDir && frand() < P_STRAIGHT) {
-        int i;
-        for (i = 0; i < nc; i++) if (cand[i] == p->dir) { d = p->dir; break; }
-    }
-    if (d < 0) d = cand[rand() % nc];
-
+    d = chooseDirection(s, p);
     nodeWorld(s, p->x, p->y, p->z, w);
+    if (d == NO_DIRECTION) {
+        addSph(s, w, CAP_R, p->col);
+        p->state = PIPE_STUCK;
+        return;
+    }
 
-    if (!p->hasDir) {
-        p->lastCyl = addCyl(s, w, d, CELL, p->col);
-    } else if (d == p->dir) {
+    if (d == p->dir) {
         if (p->lastCyl >= 0) s->prims[p->lastCyl].len += CELL;
         else p->lastCyl = addCyl(s, w, d, CELL, p->col);
-    } else if (frand() < P_BALL) {
+    } else if (turnGetsBallJoint(s)) {
         addSph(s, w, BALL_R, p->col);
         p->lastCyl = addCyl(s, w, d, CELL, p->col);
     } else {
@@ -332,35 +467,153 @@ static void stepPipe(Scene *s, Pipe *p)
         st[2] = w[2] + DV[d][2] * ELBOW_R;
         p->lastCyl = addCyl(s, st, d, CELL - ELBOW_R, p->col);
     }
-
-    p->dir = d;
-    p->hasDir = 1;
-    p->x += DV[d][0]; p->y += DV[d][1]; p->z += DV[d][2];
-    s->grid[p->x][p->y][p->z] = 1;
+    movePipe(p, d);
 }
 
-static void sceneReset(Scene *s)
+static void preparePipe(Pipe *p)
 {
-    int i;
+    memset(p, 0, sizeof *p);
+    p->lastCyl = -1;
+    if (randomBelow(LONG_RUNNER_ONE_IN) == 0)
+        p->weightStraight = randomBetween(MAX_WEIGHT_STRAIGHT / 4, MAX_WEIGHT_STRAIGHT);
+    else
+        p->weightStraight = randomBetween(1, 4);
+}
+
+static void startScene(Scene *s, int afterDissolve)
+{
+    int i, startingPipes = 1;
+
     memset(s->grid, 0, sizeof s->grid);
     s->nPrims = 0;
-    s->deaths = 0;
-    s->holding = 0;
-    for (i = 0; i < NUM_PIPES; i++)
-        if (!spawnPipe(s, &s->pipes[i])) s->pipes[i].alive = 0;
+    s->nPipes = 0;
+    s->lead = -1;
+    s->phase = SCENE_GROWING;
+    s->jointStyle = jointStyleSetting == JOINT_CYCLE ? nextJointStyle(s->jointStyle) : jointStyleSetting;
+
+    s->pipeBudget = NORMAL_PIPES_PER_SCENE;
+    if (multiplePipes) {
+        s->pipeBudget = (int)(s->pipeBudget * MULTIPLE_PIPES_FACTOR);
+        startingPipes = randomBetween(MIN_PIPES_AT_ONCE, MAX_PIPES_AT_ONCE);
+        if (startingPipes > s->pipeBudget) startingPipes = s->pipeBudget;
+        if (randomBelow(CHASE_SCENE_ONE_IN) == 0) s->chase = 1;
+    }
+
+    s->rotation = s->nextRotation;
+    if (afterDissolve) {
+        s->nextRotation += SCENE_TURN_DEGREES;
+        if (s->nextRotation >= 360.0f) s->nextRotation -= 360.0f;
+    }
+
+    s->pipesStarted = 0;
+    for (i = 0; i < startingPipes; i++) {
+        Pipe *p = &s->pipes[s->nPipes++];
+        preparePipe(p);
+        if (s->chase) {
+            if (i == 0) s->lead = 0;
+            else p->followsLead = 1;
+        }
+        startPipe(s, p);
+        if (i == 0 && s->chase) p->startsFarAway = 1;
+        s->pipesStarted++;
+    }
+}
+
+static void retireOrRestartStuckPipes(Scene *s)
+{
+    int i, kept = 0, newLead = -1, leadRetired = 0;
+
+    for (i = 0; i < s->nPipes; i++) {
+        Pipe *p = &s->pipes[i];
+        p->retired = 0;
+        if (p->state != PIPE_STUCK) continue;
+        s->pipesStarted++;
+        if (s->pipesStarted > s->pipeBudget) {
+            p->retired = 1;
+            if (i == s->lead) leadRetired = 1;
+        } else if (!startPipe(s, p)) {
+            s->pipeBudget = s->pipesStarted;
+        }
+    }
+
+    for (i = 0; i < s->nPipes; i++) {
+        if (s->pipes[i].retired) continue;
+        if (i == s->lead) newLead = kept;
+        s->pipes[kept++] = s->pipes[i];
+    }
+    s->nPipes = kept;
+    s->lead = newLead;
+
+    if (leadRetired && s->nPipes > 0) {
+        s->lead = randomBelow(s->nPipes);
+        s->pipes[s->lead].startsFarAway = 1;
+        s->pipes[s->lead].followsLead = 0;
+    }
+}
+
+static void planDissolve(Scene *s)
+{
+    int shorter = s->vw < s->vh ? s->vw : s->vh;
+    int size = shorter / DISSOLVE_SQUARES_ACROSS_SHORT_SIDE;
+    int across, down, n, i;
+    if (size < 1) size = 1;
+    for (;;) {
+        across = (s->vw + size - 1) / size;
+        down = (s->vh + size - 1) / size;
+        n = across * down;
+        if (n <= MAX_DISSOLVE_SQUARES) break;
+        size++;
+    }
+    if (n < 1) n = 1;
+    s->squareSize = size;
+    s->squaresAcross = across;
+    s->squareCount = n;
+    memset(s->squareCleared, 0, (size_t)n);
+    for (i = 0; i < n; i++) {
+        int k = randomBelow(n), up = k, down2 = k, searchUp = 0;
+        while (s->squareCleared[k]) {
+            if (searchUp) { if (up < n - 1) up++; k = up; }
+            else          { if (down2 > 0) down2--; k = down2; }
+            searchUp = !searchUp;
+        }
+        s->squareCleared[k] = 1;
+        s->dissolveOrder[i] = k;
+    }
+}
+
+static void beginDissolve(Scene *s)
+{
+    planDissolve(s);
+    s->phase = SCENE_DISSOLVING;
+    s->dissolveStart = GetTickCount64();
+}
+
+static int squaresEaten(const Scene *s, ULONGLONG now)
+{
+    ULONGLONG elapsed = now - s->dissolveStart;
+    if (s->phase != SCENE_DISSOLVING) return 0;
+    if (elapsed >= DISSOLVE_MS) return s->squareCount;
+    return (int)((ULONGLONG)s->squareCount * elapsed / DISSOLVE_MS);
 }
 
 static void sceneTick(Scene *s)
 {
     int i;
-    if (s->holding) {
-        if (GetTickCount64() - s->holdStart >= HOLD_MS) sceneReset(s);
+    if (s->phase == SCENE_DISSOLVING) {
+        if (GetTickCount64() - s->dissolveStart >= DISSOLVE_MS) startScene(s, 1);
         return;
     }
-    for (i = 0; i < NUM_PIPES; i++) {
-        if (s->holding) break;
-        if (s->pipes[i].alive) stepPipe(s, &s->pipes[i]);
+    if (s->phase == SCENE_FINISHED) {
+        beginDissolve(s);
+        return;
     }
+    retireOrRestartStuckPipes(s);
+    if (s->nPipes == 0) {
+        finishScene(s);
+        return;
+    }
+    for (i = 0; i < s->nPipes && s->phase == SCENE_GROWING; i++)
+        growPipe(s, &s->pipes[i]);
 }
 
 static void tickAll(void)
@@ -372,7 +625,7 @@ static void tickAll(void)
 static int anySceneRunning(void)
 {
     int i;
-    for (i = 0; i < nScenes; i++) if (!scenes[i]->holding) return 1;
+    for (i = 0; i < nScenes; i++) if (scenes[i]->phase == SCENE_GROWING) return 1;
     return 0;
 }
 
@@ -399,7 +652,8 @@ static Scene *sceneCreate(int vx, int vy, int vw, int vh)
     s->NY = GRID_NY;
     s->NZ = GRID_NZ;
     sceneGeometry(s);
-    sceneReset(s);
+    s->jointStyle = JOINT_MIXED;
+    startScene(s, 0);
     return s;
 }
 
@@ -485,6 +739,7 @@ static void sceneDraw(const Scene *s)
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
     glTranslatef(0.0f, 0.0f, (float)-s->camZ);
+    glRotatef(s->rotation, 0.0f, 1.0f, 0.0f);
 
     for (i = 0; i < s->nPrims; i++) {
         const Prim *p = &s->prims[i];
@@ -514,12 +769,43 @@ static void sceneDraw(const Scene *s)
     }
 }
 
+static void drawDissolve(const Scene *s, int eaten)
+{
+    int i;
+    if (eaten <= 0) return;
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0.0, s->vw, 0.0, s->vh, -1.0, 1.0);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glDisable(GL_LIGHTING);
+    glDisable(GL_DEPTH_TEST);
+    glColor3f(0.0f, 0.0f, 0.0f);
+    glBegin(GL_QUADS);
+    for (i = 0; i < eaten; i++) {
+        int k = s->dissolveOrder[i];
+        int x0 = (k % s->squaresAcross) * s->squareSize;
+        int y0 = (k / s->squaresAcross) * s->squareSize;
+        int x1 = x0 + s->squareSize, y1 = y0 + s->squareSize;
+        glVertex2i(x0, y0);
+        glVertex2i(x1, y0);
+        glVertex2i(x1, y1);
+        glVertex2i(x0, y1);
+    }
+    glEnd();
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_LIGHTING);
+}
+
 static void drawAll(void)
 {
     int i;
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    for (i = 0; i < nScenes; i++) sceneDraw(scenes[i]);
+    for (i = 0; i < nScenes; i++) {
+        sceneDraw(scenes[i]);
+        drawDissolve(scenes[i], squaresEaten(scenes[i], GetTickCount64()));
+    }
 }
 
 static void initGL(void)

@@ -97,109 +97,6 @@ static LaunchOptions parsed(const char *commandLine)
     return options;
 }
 
-static Scene *emptyScene(void)
-{
-    Scene *s = (Scene *)calloc(1, sizeof(Scene));
-    if (!s) {
-        fprintf(stderr, "out of memory while building a test scene\n");
-        exit(2);
-    }
-    s->vw = 1280;
-    s->vh = 720;
-    s->NY = GRID_NY;
-    s->NZ = GRID_NZ;
-    sceneGeometry(s);
-    return s;
-}
-
-static Scene *sceneGrownFromSeed(unsigned seed)
-{
-    srand(seed);
-    return sceneCreate(0, 0, 1280, 720);
-}
-
-static void occupy(Scene *s, int x, int y, int z)
-{
-    if (inBounds(s, x, y, z)) s->grid[x][y][z] = 1;
-}
-
-static void occupyNeighboursExcept(Scene *s, int x, int y, int z, int openDir)
-{
-    int d;
-    for (d = 0; d < 6; d++)
-        if (d != openDir) occupy(s, x + DV[d][0], y + DV[d][1], z + DV[d][2]);
-}
-
-static Pipe *pipeArrivingAt(Scene *s, int x, int y, int z, int dir)
-{
-    Pipe *p = &s->pipes[0];
-    float from[3];
-    int i;
-    for (i = 0; i < NUM_PIPES; i++) s->pipes[i].alive = 0;
-    memset(p, 0, sizeof *p);
-    p->alive = 1;
-    p->x = x; p->y = y; p->z = z;
-    p->dir = dir;
-    p->hasDir = 1;
-    p->col[0] = 1.0f;
-    occupy(s, x, y, z);
-    occupy(s, x - DV[dir][0], y - DV[dir][1], z - DV[dir][2]);
-    nodeWorld(s, x - DV[dir][0], y - DV[dir][1], z - DV[dir][2], from);
-    p->lastCyl = addCyl(s, from, dir, CELL, p->col);
-    return p;
-}
-
-static int sameNode(const float *a, const float *b)
-{
-    return fabs(a[0] - b[0]) < 1e-4 && fabs(a[1] - b[1]) < 1e-4 && fabs(a[2] - b[2]) < 1e-4;
-}
-
-typedef struct {
-    int moves;
-    int jumps;
-    int movesIntoTakenNodes;
-    int reversals;
-    int stepsOutsideGrid;
-} WalkReport;
-
-static WalkReport walkPipesThroughSeveralScenes(unsigned seed, int scenesToRun)
-{
-    WalkReport report;
-    Scene *s = sceneGrownFromSeed(seed);
-    int sceneNumber, guard, i, d;
-    memset(&report, 0, sizeof report);
-    for (sceneNumber = 0; sceneNumber < scenesToRun; sceneNumber++) {
-        for (guard = 0; guard < 5000 && !s->holding; guard++) {
-            for (i = 0; i < NUM_PIPES && !s->holding; i++) {
-                Pipe before = s->pipes[i];
-                int wasFree[6];
-                int deathsBefore = s->deaths;
-                int dx, dy, dz, moved = -1;
-                if (!before.alive) continue;
-                for (d = 0; d < 6; d++) {
-                    int nx = before.x + DV[d][0], ny = before.y + DV[d][1], nz = before.z + DV[d][2];
-                    wasFree[d] = inBounds(s, nx, ny, nz) && !s->grid[nx][ny][nz];
-                }
-                stepPipe(s, &s->pipes[i]);
-                if (s->deaths != deathsBefore) continue;
-                report.moves++;
-                dx = s->pipes[i].x - before.x;
-                dy = s->pipes[i].y - before.y;
-                dz = s->pipes[i].z - before.z;
-                if (abs(dx) + abs(dy) + abs(dz) != 1) { report.jumps++; continue; }
-                for (d = 0; d < 6; d++)
-                    if (DV[d][0] == dx && DV[d][1] == dy && DV[d][2] == dz) moved = d;
-                if (!wasFree[moved]) report.movesIntoTakenNodes++;
-                if (before.hasDir && moved == (before.dir ^ 1)) report.reversals++;
-                if (!inBounds(s, s->pipes[i].x, s->pipes[i].y, s->pipes[i].z)) report.stepsOutsideGrid++;
-            }
-        }
-        sceneReset(s);
-    }
-    free(s);
-    return report;
-}
-
 static void no_arguments_open_the_windowed_viewer(void)
 {
     expectNumber("mode for an empty command line", MODE_WINDOWED, parsed("").mode);
@@ -260,50 +157,210 @@ static void slash_p_asks_for_the_preview_pane(void)
     expectNumber("mode for /p 1234", MODE_PREVIEW, parsed("/p 1234").mode);
 }
 
-static void a_new_scene_starts_every_pipe_on_its_own_free_node_with_a_cap(void)
+typedef struct {
+    int multiple;
+    int joints;
+} SavedSettings;
+
+static SavedSettings useSettings(int multiple, int joints)
 {
-    Scene *s = sceneGrownFromSeed(1);
-    int i, j;
-    expectNumber("pieces in a brand new scene", NUM_PIPES, s->nPrims);
-    for (i = 0; i < NUM_PIPES; i++) {
-        float w[3];
-        const Pipe *p = &s->pipes[i];
-        expect(p->alive, "every pipe to be growing");
-        expect(s->grid[p->x][p->y][p->z], "every pipe's node to be marked as taken");
-        nodeWorld(s, p->x, p->y, p->z, w);
-        expect(s->prims[i].type == PRIM_SPH && s->prims[i].r == CAP_R, "each pipe to begin with a start cap");
-        expect(sameNode(s->prims[i].a, w), "each start cap to sit on its pipe's node");
-        for (j = 0; j < i; j++)
-            expect(p->x != s->pipes[j].x || p->y != s->pipes[j].y || p->z != s->pipes[j].z,
-                   "no two pipes to start on the same node");
+    SavedSettings saved;
+    saved.multiple = multiplePipes;
+    saved.joints = jointStyleSetting;
+    multiplePipes = multiple;
+    jointStyleSetting = joints;
+    return saved;
+}
+
+static void restoreSettings(SavedSettings saved)
+{
+    multiplePipes = saved.multiple;
+    jointStyleSetting = saved.joints;
+}
+
+static Scene *emptyScene(void)
+{
+    Scene *s = (Scene *)calloc(1, sizeof(Scene));
+    if (!s) {
+        fprintf(stderr, "out of memory while building a test scene\n");
+        exit(2);
+    }
+    s->vw = 1280;
+    s->vh = 720;
+    s->NY = GRID_NY;
+    s->NZ = GRID_NZ;
+    s->lead = -1;
+    s->jointStyle = JOINT_ELBOW;
+    s->pipeBudget = NORMAL_PIPES_PER_SCENE;
+    s->phase = SCENE_GROWING;
+    sceneGeometry(s);
+    return s;
+}
+
+static Scene *sceneGrownFromSeed(unsigned seed)
+{
+    srand(seed);
+    return sceneCreate(0, 0, 1280, 720);
+}
+
+static void occupy(Scene *s, int x, int y, int z)
+{
+    if (inBounds(s, x, y, z)) s->grid[x][y][z] = 1;
+}
+
+static void occupyNeighboursExcept(Scene *s, int x, int y, int z, int openDir)
+{
+    int d;
+    for (d = 0; d < 6; d++)
+        if (d != openDir) occupy(s, x + DV[d][0], y + DV[d][1], z + DV[d][2]);
+}
+
+static void occupyEverything(Scene *s)
+{
+    memset(s->grid, 1, sizeof s->grid);
+}
+
+static Pipe *pipeArrivingAt(Scene *s, int x, int y, int z, int dir, int weight)
+{
+    Pipe *p = &s->pipes[s->nPipes++];
+    float from[3];
+    memset(p, 0, sizeof *p);
+    p->state = PIPE_ACTIVE;
+    p->x = x; p->y = y; p->z = z;
+    p->dir = dir;
+    p->weightStraight = weight;
+    p->col[0] = 1.0f;
+    occupy(s, x, y, z);
+    occupy(s, x - DV[dir][0], y - DV[dir][1], z - DV[dir][2]);
+    nodeWorld(s, x - DV[dir][0], y - DV[dir][1], z - DV[dir][2], from);
+    p->lastCyl = addCyl(s, from, dir, CELL, p->col);
+    return p;
+}
+
+static int sameNode(const float *a, const float *b)
+{
+    return fabs(a[0] - b[0]) < 1e-4 && fabs(a[1] - b[1]) < 1e-4 && fabs(a[2] - b[2]) < 1e-4;
+}
+
+static int isStartCap(const Scene *s, int i)
+{
+    return s->prims[i].type == PRIM_SPH && s->prims[i].r == CAP_R;
+}
+
+static int pipesDrawnInPicture(const Scene *s)
+{
+    int i, caps = 0, pipesThatGrew = 0;
+    for (i = 0; i < s->nPrims; i++) {
+        if (!isStartCap(s, i)) continue;
+        caps++;
+        if (i + 1 < s->nPrims && s->prims[i + 1].type == PRIM_CYL && sameNode(s->prims[i].a, s->prims[i + 1].a))
+            pipesThatGrew++;
+    }
+    return caps - pipesThatGrew;
+}
+
+static int runSceneUntilItFinishes(Scene *s, int *mostPipesAtOnce)
+{
+    int ticks = 0;
+    if (mostPipesAtOnce) *mostPipesAtOnce = s->nPipes;
+    while (s->phase == SCENE_GROWING && ticks < 100000) {
+        sceneTick(s);
+        if (mostPipesAtOnce && s->nPipes > *mostPipesAtOnce) *mostPipesAtOnce = s->nPipes;
+        ticks++;
+    }
+    return ticks;
+}
+
+typedef struct {
+    int moves;
+    int jumps;
+    int movesIntoTakenNodes;
+    int reversals;
+    int stepsOutsideGrid;
+} WalkReport;
+
+static WalkReport walkPipesThroughSeveralScenes(unsigned seed, int scenesToRun)
+{
+    WalkReport report;
+    SavedSettings saved = useSettings(1, JOINT_MIXED);
+    Scene *s = sceneGrownFromSeed(seed);
+    int sceneNumber, guard, i, d;
+    memset(&report, 0, sizeof report);
+    for (sceneNumber = 0; sceneNumber < scenesToRun; sceneNumber++) {
+        for (guard = 0; guard < 5000; guard++) {
+            retireOrRestartStuckPipes(s);
+            if (s->nPipes == 0) break;
+            for (i = 0; i < s->nPipes; i++) {
+                Pipe before = s->pipes[i];
+                int wasFree[6];
+                int dx, dy, dz, moved = -1;
+                if (before.state != PIPE_ACTIVE) { growPipe(s, &s->pipes[i]); continue; }
+                for (d = 0; d < 6; d++) wasFree[d] = isFreeToward(s, &before, d);
+                growPipe(s, &s->pipes[i]);
+                if (s->pipes[i].state != PIPE_ACTIVE) continue;
+                report.moves++;
+                dx = s->pipes[i].x - before.x;
+                dy = s->pipes[i].y - before.y;
+                dz = s->pipes[i].z - before.z;
+                if (abs(dx) + abs(dy) + abs(dz) != 1) { report.jumps++; continue; }
+                for (d = 0; d < 6; d++)
+                    if (DV[d][0] == dx && DV[d][1] == dy && DV[d][2] == dz) moved = d;
+                if (!wasFree[moved]) report.movesIntoTakenNodes++;
+                if (moved == (before.dir ^ 1)) report.reversals++;
+                if (!inBounds(s, s->pipes[i].x, s->pipes[i].y, s->pipes[i].z)) report.stepsOutsideGrid++;
+            }
+        }
+        startScene(s, 1);
     }
     free(s);
+    restoreSettings(saved);
+    return report;
+}
+
+static void a_new_scene_starts_its_pipe_with_a_cap_and_a_first_stretch_of_pipe(void)
+{
+    SavedSettings saved = useSettings(0, JOINT_ELBOW);
+    Scene *s = sceneGrownFromSeed(1);
+    const Pipe *p = &s->pipes[0];
+    float now[3];
+    expectNumber("pipes growing in a new single-pipe scene", 1, s->nPipes);
+    expectNumber("pieces in a new scene", 2, s->nPrims);
+    expect(isStartCap(s, 0), "the first piece to be a start cap");
+    expect(s->prims[1].type == PRIM_CYL && sameNode(s->prims[0].a, s->prims[1].a),
+           "the first stretch of pipe to leave from the cap");
+    nodeWorld(s, p->x, p->y, p->z, now);
+    expect(fabs(fabs(now[0] - s->prims[0].a[0]) + fabs(now[1] - s->prims[0].a[1]) +
+                fabs(now[2] - s->prims[0].a[2]) - CELL) < 1e-4,
+           "the pipe to be one node away from its cap after starting");
+    expect(s->grid[p->x][p->y][p->z], "the pipe's node to be marked as taken");
+    free(s);
+    restoreSettings(saved);
 }
 
 static void a_pipe_only_ever_moves_one_node_at_a_time(void)
 {
-    WalkReport r = walkPipesThroughSeveralScenes(11, 6);
+    WalkReport r = walkPipesThroughSeveralScenes(11, 8);
     expect(r.moves > 500, "plenty of moves to be checked");
     expectNumber("moves longer than one node", 0, r.jumps);
 }
 
 static void a_pipe_never_moves_into_a_node_that_is_already_taken(void)
 {
-    WalkReport r = walkPipesThroughSeveralScenes(12, 6);
+    WalkReport r = walkPipesThroughSeveralScenes(12, 8);
     expect(r.moves > 500, "plenty of moves to be checked");
     expectNumber("moves into taken nodes", 0, r.movesIntoTakenNodes);
 }
 
 static void a_pipe_never_turns_straight_back_on_itself(void)
 {
-    WalkReport r = walkPipesThroughSeveralScenes(13, 6);
+    WalkReport r = walkPipesThroughSeveralScenes(13, 8);
     expect(r.moves > 500, "plenty of moves to be checked");
     expectNumber("reversals", 0, r.reversals);
 }
 
 static void pipes_never_leave_the_grid(void)
 {
-    WalkReport r = walkPipesThroughSeveralScenes(14, 6);
+    WalkReport r = walkPipesThroughSeveralScenes(14, 8);
     expect(r.moves > 500, "plenty of moves to be checked");
     expectNumber("steps outside the grid", 0, r.stepsOutsideGrid);
 }
@@ -311,32 +368,121 @@ static void pipes_never_leave_the_grid(void)
 static void going_straight_lengthens_the_current_pipe_instead_of_adding_a_piece(void)
 {
     Scene *s = emptyScene();
-    Pipe *p = pipeArrivingAt(s, 5, 5, 5, 0);
-    int piecesBefore;
-    occupyNeighboursExcept(s, 5, 5, 5, 0);
-    piecesBefore = s->nPrims;
-    stepPipe(s, p);
+    Pipe *p = pipeArrivingAt(s, 5, 5, 5, 0, MAX_WEIGHT_STRAIGHT);
+    int piecesBefore = s->nPrims;
+    growPipe(s, p);
     expectNumber("pieces after a straight step", piecesBefore, s->nPrims);
     expectNear("length of the straight pipe", 2.0 * CELL, s->prims[p->lastCyl].len);
     expectNumber("pipe x after moving along +x", 6, p->x);
     free(s);
 }
 
+static void a_long_runner_always_goes_straight_while_the_way_ahead_is_free(void)
+{
+    unsigned seed;
+    int turned = 0;
+    for (seed = 1; seed <= 300; seed++) {
+        Scene *s = emptyScene();
+        Pipe *p = pipeArrivingAt(s, 5, 5, 5, 0, MAX_WEIGHT_STRAIGHT);
+        srand(seed);
+        if (chooseDirection(s, p) != 0) turned++;
+        free(s);
+    }
+    expectNumber("turns taken by a pipe with the top straight weight", 0, turned);
+}
+
+static void a_pipe_turns_whenever_the_way_ahead_is_blocked(void)
+{
+    unsigned seed;
+    int wentStraight = 0, gotStuck = 0;
+    for (seed = 1; seed <= 300; seed++) {
+        Scene *s = emptyScene();
+        Pipe *p = pipeArrivingAt(s, 5, 5, 5, 0, MAX_WEIGHT_STRAIGHT);
+        int d;
+        occupy(s, 6, 5, 5);
+        srand(seed);
+        d = chooseDirection(s, p);
+        if (d == 0) wentStraight++;
+        if (d == NO_DIRECTION) gotStuck++;
+        free(s);
+    }
+    expectNumber("times it went straight into the blocked node", 0, wentStraight);
+    expectNumber("times it gave up although turns were free", 0, gotStuck);
+}
+
+static void a_short_runner_goes_straight_in_proportion_to_its_weight(void)
+{
+    unsigned seed;
+    int straight = 0;
+    const int trials = 6000;
+    for (seed = 1; seed <= (unsigned)trials; seed++) {
+        Scene *s = emptyScene();
+        Pipe *p = pipeArrivingAt(s, 5, 5, 5, 0, 2);
+        srand(seed);
+        if (chooseDirection(s, p) == 0) straight++;
+        free(s);
+    }
+    expectBetween("share of straight steps with weight 2 against 4 free turns",
+                  0.30, 0.37, (double)straight / trials);
+}
+
+static void about_one_pipe_in_twenty_is_a_long_runner(void)
+{
+    int i, longRunners = 0, lowestShort = 99, highestShort = 0, lowestLong = 999, highestLong = 0;
+    const int pipes = 40000;
+    srand(77);
+    for (i = 0; i < pipes; i++) {
+        Pipe p;
+        preparePipe(&p);
+        if (p.weightStraight >= MAX_WEIGHT_STRAIGHT / 4) {
+            longRunners++;
+            if (p.weightStraight < lowestLong) lowestLong = p.weightStraight;
+            if (p.weightStraight > highestLong) highestLong = p.weightStraight;
+        } else {
+            if (p.weightStraight < lowestShort) lowestShort = p.weightStraight;
+            if (p.weightStraight > highestShort) highestShort = p.weightStraight;
+        }
+    }
+    expectBetween("share of long runners", 0.04, 0.06, (double)longRunners / pipes);
+    expectNumber("smallest everyday straight weight", 1, lowestShort);
+    expectNumber("largest everyday straight weight", 4, highestShort);
+    expectNumber("smallest long-runner weight", MAX_WEIGHT_STRAIGHT / 4, lowestLong);
+    expectNumber("largest long-runner weight", MAX_WEIGHT_STRAIGHT, highestLong);
+}
+
+static void the_same_seed_always_grows_the_same_pipes(void)
+{
+    SavedSettings saved = useSettings(1, JOINT_MIXED);
+    Scene *a = sceneGrownFromSeed(42);
+    Scene *b;
+    int i;
+    for (i = 0; i < 300; i++) sceneTick(a);
+    b = sceneGrownFromSeed(42);
+    for (i = 0; i < 300; i++) sceneTick(b);
+    expectNumber("pieces in the second scene", a->nPrims, b->nPrims);
+    expect(memcmp(a->prims, b->prims, sizeof(Prim) * (size_t)a->nPrims) == 0, "every piece to match");
+    free(a);
+    free(b);
+    restoreSettings(saved);
+}
+
 typedef enum { TURN_MADE_A_BALL, TURN_MADE_AN_ELBOW, TURN_MADE_SOMETHING_ELSE } TurnResult;
 
-static TurnResult turnUpwardsWithSeed(unsigned seed)
+static TurnResult turnUpwardsWithSeed(int jointStyle, unsigned seed)
 {
     Scene *s = emptyScene();
-    Pipe *p = pipeArrivingAt(s, 5, 5, 5, 0);
-    int incoming = p->lastCyl;
-    int first;
+    Pipe *p;
+    int incoming, first;
     float node[3], expectedStart[3];
     TurnResult result = TURN_MADE_SOMETHING_ELSE;
+    s->jointStyle = jointStyle;
+    p = pipeArrivingAt(s, 5, 5, 5, 0, 1);
+    incoming = p->lastCyl;
     occupyNeighboursExcept(s, 5, 5, 5, 2);
     nodeWorld(s, 5, 5, 5, node);
     first = s->nPrims;
     srand(seed);
-    stepPipe(s, p);
+    growPipe(s, p);
     if (s->nPrims == first + 2 && s->prims[first].type == PRIM_SPH) {
         const Prim *ball = &s->prims[first], *next = &s->prims[first + 1];
         if (ball->r == BALL_R && sameNode(ball->a, node) && next->type == PRIM_CYL &&
@@ -358,105 +504,409 @@ static TurnResult turnUpwardsWithSeed(unsigned seed)
     return result;
 }
 
-static void a_ball_joint_is_a_big_sphere_with_the_new_pipe_starting_at_its_centre(void)
+static int countTurns(int jointStyle, TurnResult wanted, int trials)
 {
-    unsigned seed;
-    int balls = 0, misshapen = 0;
-    for (seed = 1; seed <= 200; seed++) {
-        TurnResult r = turnUpwardsWithSeed(seed);
-        if (r == TURN_MADE_A_BALL) balls++;
-        if (r == TURN_MADE_SOMETHING_ELSE) misshapen++;
+    int seed, count = 0;
+    for (seed = 1; seed <= trials; seed++)
+        if (turnUpwardsWithSeed(jointStyle, (unsigned)seed) == wanted) count++;
+    return count;
+}
+
+static void with_elbow_joints_every_turn_is_an_elbow_that_pulls_the_incoming_pipe_back(void)
+{
+    expectNumber("well-formed elbows out of 200 turns", 200, countTurns(JOINT_ELBOW, TURN_MADE_AN_ELBOW, 200));
+}
+
+static void with_ball_joints_every_turn_is_a_big_sphere_with_the_new_pipe_leaving_its_centre(void)
+{
+    expectNumber("well-formed ball joints out of 200 turns", 200, countTurns(JOINT_BALL, TURN_MADE_A_BALL, 200));
+}
+
+static void with_mixed_joints_about_one_turn_in_three_is_a_ball(void)
+{
+    const int trials = 3000;
+    int balls = countTurns(JOINT_MIXED, TURN_MADE_A_BALL, trials);
+    int elbows = countTurns(JOINT_MIXED, TURN_MADE_AN_ELBOW, trials);
+    expectNumber("turns that made something other than a ball or an elbow", trials, balls + elbows);
+    expectBetween("share of turns with a ball joint", 0.30, 0.37, (double)balls / trials);
+}
+
+static void with_cycling_joints_each_scene_moves_on_from_elbows_to_balls_to_mixed(void)
+{
+    SavedSettings saved = useSettings(0, JOINT_CYCLE);
+    Scene *s = sceneGrownFromSeed(3);
+    expectNumber("joints in the first scene (0 elbow, 1 ball, 2 mixed)", JOINT_ELBOW, s->jointStyle);
+    startScene(s, 1);
+    expectNumber("joints in the second scene", JOINT_BALL, s->jointStyle);
+    startScene(s, 1);
+    expectNumber("joints in the third scene", JOINT_MIXED, s->jointStyle);
+    startScene(s, 1);
+    expectNumber("joints in the fourth scene", JOINT_ELBOW, s->jointStyle);
+    free(s);
+    restoreSettings(saved);
+}
+
+static void a_fixed_joint_style_stays_the_same_in_every_scene(void)
+{
+    SavedSettings saved = useSettings(0, JOINT_BALL);
+    Scene *s = sceneGrownFromSeed(3);
+    int i;
+    for (i = 0; i < 4; i++) {
+        expectNumber("joints in every scene (1 = ball)", JOINT_BALL, s->jointStyle);
+        startScene(s, 1);
     }
-    expect(balls > 0, "at least one turn to make a ball joint");
-    expectNumber("turns that made something other than a ball or an elbow", 0, misshapen);
+    free(s);
+    restoreSettings(saved);
 }
 
-static void an_elbow_pulls_the_incoming_pipe_back_by_the_bend_radius(void)
+static void single_pipe_mode_grows_one_pipe_at_a_time_and_five_pipes_per_scene(void)
 {
+    SavedSettings saved = useSettings(0, JOINT_ELBOW);
     unsigned seed;
-    int elbows = 0, misshapen = 0;
-    for (seed = 1; seed <= 200; seed++) {
-        TurnResult r = turnUpwardsWithSeed(seed);
-        if (r == TURN_MADE_AN_ELBOW) elbows++;
-        if (r == TURN_MADE_SOMETHING_ELSE) misshapen++;
+    int mostAtOnce = 0, fivePipeScenes = 0;
+    for (seed = 1; seed <= 20; seed++) {
+        Scene *s = sceneGrownFromSeed(seed);
+        int most;
+        runSceneUntilItFinishes(s, &most);
+        if (most > mostAtOnce) mostAtOnce = most;
+        if (pipesDrawnInPicture(s) == 5) fivePipeScenes++;
+        free(s);
     }
-    expect(elbows > 0, "at least one turn to make an elbow");
-    expectNumber("turns that made something other than a ball or an elbow", 0, misshapen);
+    expectNumber("most pipes growing at once", 1, mostAtOnce);
+    expectNumber("scenes out of 20 that drew exactly five pipes", 20, fivePipeScenes);
+    restoreSettings(saved);
 }
 
-static void about_one_turn_in_four_gets_a_ball_joint(void)
+static void multiple_pipe_mode_starts_two_to_four_pipes_together(void)
 {
+    SavedSettings saved = useSettings(1, JOINT_ELBOW);
     unsigned seed;
-    int balls = 0;
-    const int turns = 2000;
-    for (seed = 1; seed <= (unsigned)turns; seed++)
-        if (turnUpwardsWithSeed(seed) == TURN_MADE_A_BALL) balls++;
-    expectBetween("share of turns with a ball joint", 0.20, 0.30, (double)balls / turns);
+    int seen[MAX_PIPES_AT_ONCE + 1];
+    int outside = 0;
+    memset(seen, 0, sizeof seen);
+    for (seed = 1; seed <= 300; seed++) {
+        Scene *s = sceneGrownFromSeed(seed);
+        if (s->nPipes < MIN_PIPES_AT_ONCE || s->nPipes > MAX_PIPES_AT_ONCE) outside++;
+        else seen[s->nPipes]++;
+        free(s);
+    }
+    expectNumber("scenes starting with fewer than two or more than four pipes", 0, outside);
+    expect(seen[2] && seen[3] && seen[4], "scenes starting with two, three and four pipes all to occur");
+    restoreSettings(saved);
 }
 
-static void a_pipe_with_nowhere_to_go_gets_an_end_cap_and_a_replacement(void)
+static void multiple_pipe_mode_draws_seven_pipes_per_scene(void)
+{
+    SavedSettings saved = useSettings(1, JOINT_ELBOW);
+    unsigned seed;
+    int tooMany = 0, sevenPipeScenes = 0;
+    for (seed = 1; seed <= 20; seed++) {
+        Scene *s = sceneGrownFromSeed(seed);
+        int started;
+        runSceneUntilItFinishes(s, NULL);
+        started = pipesDrawnInPicture(s);
+        if (started > 7) tooMany++;
+        if (started == 7) sevenPipeScenes++;
+        free(s);
+    }
+    expectNumber("scenes with more than seven pipes", 0, tooMany);
+    expectNumber("scenes out of 20 that drew exactly seven pipes", 20, sevenPipeScenes);
+    restoreSettings(saved);
+}
+
+static void a_stuck_pipe_gets_an_end_cap_and_a_replacement_while_the_budget_lasts(void)
 {
     Scene *s = emptyScene();
-    Pipe *p = pipeArrivingAt(s, 5, 5, 5, 0);
+    Pipe *p = pipeArrivingAt(s, 5, 5, 5, 0, 1);
     float node[3];
     int capIndex;
+    s->pipesStarted = 1;
     occupyNeighboursExcept(s, 5, 5, 5, -1);
     capIndex = s->nPrims;
     nodeWorld(s, 5, 5, 5, node);
     srand(3);
-    stepPipe(s, p);
-    expect(s->prims[capIndex].type == PRIM_SPH && s->prims[capIndex].r == CAP_R,
-           "the stuck pipe to get an end cap");
-    expect(sameNode(s->prims[capIndex].a, node), "the end cap to sit where the pipe got stuck");
-    expectNumber("finished pipes", 1, s->deaths);
-    expect(p->alive, "a replacement pipe to start growing");
-    expect(p->x != 5 || p->y != 5 || p->z != 5, "the replacement to start somewhere else");
-    expect(s->prims[capIndex + 1].type == PRIM_SPH, "the replacement to begin with a start cap");
+    growPipe(s, p);
+    expect(isStartCap(s, capIndex) && sameNode(s->prims[capIndex].a, node),
+           "an end cap where the pipe got stuck");
+    expectNumber("pipe state after getting stuck (1 = stuck)", PIPE_STUCK, p->state);
+    retireOrRestartStuckPipes(s);
+    expectNumber("pipes still in the scene", 1, s->nPipes);
+    expectNumber("state of the replacement (0 = growing)", PIPE_ACTIVE, s->pipes[0].state);
+    expect(isStartCap(s, capIndex + 1), "the replacement to begin with its own start cap");
+    expectNumber("pipes started so far", 2, s->pipesStarted);
     free(s);
 }
 
-static void the_scene_pauses_after_twelve_finished_pipes_and_then_starts_over(void)
+static void once_the_budget_is_spent_a_stuck_pipe_retires_and_the_scene_finishes(void)
 {
-    Scene *s = sceneGrownFromSeed(5);
-    int piecesWhenFinished;
-    s->deaths = DEATHS_RESET - 1;
-    killPipe(s, &s->pipes[0]);
-    expect(s->holding, "the scene to hold once the twelfth pipe finishes");
-    piecesWhenFinished = s->nPrims;
+    Scene *s = emptyScene();
+    Pipe *p = pipeArrivingAt(s, 5, 5, 5, 0, 1);
+    s->pipesStarted = NORMAL_PIPES_PER_SCENE;
+    p->state = PIPE_STUCK;
+    retireOrRestartStuckPipes(s);
+    expectNumber("pipes left", 0, s->nPipes);
     sceneTick(s);
-    expect(s->holding, "the scene to keep holding during the pause");
-    expectNumber("pieces during the pause", piecesWhenFinished, s->nPrims);
-    s->holdStart -= HOLD_MS;
-    sceneTick(s);
-    expect(!s->holding, "the scene to start over after the pause");
-    expectNumber("finished pipes after starting over", 0, s->deaths);
-    expectNumber("pieces after starting over", NUM_PIPES, s->nPrims);
+    expectNumber("scene phase (1 = finished)", SCENE_FINISHED, s->phase);
     free(s);
 }
 
-static void a_full_picture_starts_over_instead_of_overflowing(void)
+static void a_pipe_that_cannot_find_a_free_node_ends_the_scene_early(void)
+{
+    Scene *s = emptyScene();
+    Pipe *p = pipeArrivingAt(s, 5, 5, 5, 0, 1);
+    s->pipesStarted = 1;
+    p->state = PIPE_STUCK;
+    occupyEverything(s);
+    retireOrRestartStuckPipes(s);
+    expectNumber("budget after failing to find a free node", 2, s->pipeBudget);
+    expectNumber("pipe state (2 = out of nodes)", PIPE_OUT_OF_NODES, s->pipes[0].state);
+    sceneTick(s);
+    expectNumber("pipe state one step later (1 = stuck)", PIPE_STUCK, s->pipes[0].state);
+    sceneTick(s);
+    expectNumber("pipes left", 0, s->nPipes);
+    expectNumber("scene phase (1 = finished)", SCENE_FINISHED, s->phase);
+    free(s);
+}
+
+static void a_pipe_that_starts_boxed_in_is_finished_at_once(void)
+{
+    Scene *s = emptyScene();
+    Pipe p;
+    int i;
+    occupyEverything(s);
+    s->grid[5][5][5] = 0;
+    memset(&p, 0, sizeof p);
+    p.weightStraight = 1;
+    srand(1);
+    expect(startPipe(s, &p), "the start itself to succeed");
+    expectNumber("pipe state (1 = stuck)", PIPE_STUCK, p.state);
+    expectNumber("pieces drawn for it", 1, s->nPrims);
+    for (i = 0; i < 3; i++)
+        expectNumber("pipe position", 5, i == 0 ? p.x : i == 1 ? p.y : p.z);
+    free(s);
+}
+
+static void about_one_multiple_pipe_scene_in_five_becomes_a_chase(void)
+{
+    SavedSettings saved = useSettings(1, JOINT_ELBOW);
+    unsigned seed;
+    int chases = 0;
+    const int scenesTried = 1000;
+    for (seed = 1; seed <= (unsigned)scenesTried; seed++) {
+        Scene *s = sceneGrownFromSeed(seed);
+        if (s->chase) chases++;
+        free(s);
+    }
+    expectBetween("share of new scenes that are chases", 0.16, 0.24, (double)chases / scenesTried);
+    restoreSettings(saved);
+}
+
+static void single_pipe_scenes_never_chase(void)
+{
+    SavedSettings saved = useSettings(0, JOINT_ELBOW);
+    unsigned seed;
+    int chases = 0;
+    for (seed = 1; seed <= 300; seed++) {
+        Scene *s = sceneGrownFromSeed(seed);
+        if (s->chase) chases++;
+        free(s);
+    }
+    expectNumber("chasing single-pipe scenes", 0, chases);
+    restoreSettings(saved);
+}
+
+static void once_a_chase_has_started_every_later_scene_is_a_chase_like_the_original(void)
+{
+    SavedSettings saved = useSettings(1, JOINT_ELBOW);
+    Scene *s = sceneGrownFromSeed(4);
+    int i, followers = 0;
+    s->chase = 1;
+    startScene(s, 1);
+    expect(s->chase, "the next scene to chase as well");
+    expectNumber("lead pipe", 0, s->lead);
+    for (i = 1; i < s->nPipes; i++) if (s->pipes[i].followsLead) followers++;
+    expectNumber("pipes following the lead", s->nPipes - 1, followers);
+    expect(s->pipes[0].startsFarAway, "the lead to restart far away from where it gets stuck");
+    free(s);
+    restoreSettings(saved);
+}
+
+static void in_a_chase_the_other_pipes_head_towards_the_lead(void)
+{
+    unsigned seed;
+    int towards = 0;
+    for (seed = 1; seed <= 200; seed++) {
+        Scene *s = emptyScene();
+        Pipe *lead = pipeArrivingAt(s, 10, 5, 5, 2, 1);
+        Pipe *follower = pipeArrivingAt(s, 4, 5, 5, 2, 1);
+        s->lead = 0;
+        follower->followsLead = 1;
+        (void)lead;
+        srand(seed);
+        if (chooseDirection(s, follower) == 0) towards++;
+        free(s);
+    }
+    expectNumber("steps out of 200 that moved towards the lead", 200, towards);
+}
+
+static void a_chasing_pipe_that_cannot_head_for_the_lead_takes_any_free_way(void)
+{
+    Scene *s = emptyScene();
+    Pipe *follower;
+    pipeArrivingAt(s, 10, 5, 5, 2, 1);
+    follower = pipeArrivingAt(s, 4, 5, 5, 2, 1);
+    s->lead = 0;
+    follower->followsLead = 1;
+    occupyNeighboursExcept(s, 4, 5, 5, 5);
+    srand(1);
+    expectNumber("direction taken (5 = -z, the only free way)", 5, chooseDirection(s, follower));
+    free(s);
+}
+
+static void the_lead_restarts_in_the_far_corner_from_where_it_got_stuck(void)
+{
+    Scene *s = emptyScene();
+    Pipe stuckNearOrigin;
+    int pos[3];
+    memset(&stuckNearOrigin, 0, sizeof stuckNearOrigin);
+    stuckNearOrigin.x = 1; stuckNearOrigin.y = 1; stuckNearOrigin.z = 1;
+    srand(1);
+    expect(findFreeNodeFarFrom(s, &stuckNearOrigin, pos), "a far node to be found");
+    expectNumber("far x", s->NX - 1, pos[0]);
+    expectNumber("far y", s->NY - 1, pos[1]);
+    expectNumber("far z", s->NZ - 1, pos[2]);
+    occupy(s, s->NX - 1, s->NY - 1, s->NZ - 1);
+    expect(findFreeNodeFarFrom(s, &stuckNearOrigin, pos), "a node next to the taken corner to be found");
+    expect(abs(pos[0] - (s->NX - 1)) <= 1 && abs(pos[1] - (s->NY - 1)) <= 1 && abs(pos[2] - (s->NZ - 1)) <= 1,
+           "the node to be right next to the far corner");
+    free(s);
+}
+
+static void when_the_lead_retires_another_pipe_takes_over_the_lead(void)
+{
+    Scene *s = emptyScene();
+    Pipe *lead, *follower;
+    lead = pipeArrivingAt(s, 2, 2, 2, 0, 1);
+    follower = pipeArrivingAt(s, 8, 8, 8, 0, 1);
+    s->chase = 1;
+    s->lead = 0;
+    follower->followsLead = 1;
+    s->pipesStarted = s->pipeBudget;
+    lead->state = PIPE_STUCK;
+    srand(1);
+    retireOrRestartStuckPipes(s);
+    expectNumber("pipes left", 1, s->nPipes);
+    expectNumber("new lead", 0, s->lead);
+    expect(!s->pipes[0].followsLead, "the new lead to stop following");
+    expect(s->pipes[0].startsFarAway, "the new lead to restart far away");
+    free(s);
+}
+
+static void a_full_picture_finishes_the_scene_instead_of_overflowing(void)
 {
     Scene *s = sceneGrownFromSeed(6);
     float colour[3] = { 1, 1, 1 };
     s->nPrims = MAX_PRIMS;
     expectNumber("index given to a piece that does not fit", -1, addPrim(s, PRIM_SPH, colour));
-    expect(s->holding, "the scene to hold and start over");
+    expectNumber("scene phase (1 = finished)", SCENE_FINISHED, s->phase);
     free(s);
 }
 
-static void the_same_seed_always_grows_the_same_pipes(void)
+static void a_finished_picture_stays_for_one_step_before_it_starts_to_dissolve(void)
 {
-    Scene *a = sceneGrownFromSeed(42);
-    Scene *b;
-    int i;
-    for (i = 0; i < 300; i++) sceneTick(a);
-    b = sceneGrownFromSeed(42);
-    for (i = 0; i < 300; i++) sceneTick(b);
-    expectNumber("pieces in the second scene", a->nPrims, b->nPrims);
-    expect(memcmp(a->prims, b->prims, sizeof(Prim) * (size_t)a->nPrims) == 0,
-           "every piece to match");
-    free(a);
-    free(b);
+    SavedSettings saved = useSettings(0, JOINT_ELBOW);
+    Scene *s = sceneGrownFromSeed(5);
+    int pieces;
+    runSceneUntilItFinishes(s, NULL);
+    pieces = s->nPrims;
+    expectNumber("phase when the last pipe retires (1 = finished)", SCENE_FINISHED, s->phase);
+    sceneTick(s);
+    expectNumber("phase one step later (2 = dissolving)", SCENE_DISSOLVING, s->phase);
+    expectNumber("pieces still shown while dissolving", pieces, s->nPrims);
+    expectNumber("squares eaten at the very start", 0, squaresEaten(s, s->dissolveStart));
+    free(s);
+    restoreSettings(saved);
+}
+
+static void the_dissolve_eats_every_square_exactly_once(void)
+{
+    Scene *s = emptyScene();
+    int *timesEaten, i, wrong = 0;
+    srand(8);
+    planDissolve(s);
+    timesEaten = (int *)calloc((size_t)s->squareCount, sizeof(int));
+    for (i = 0; i < s->squareCount; i++) timesEaten[s->dissolveOrder[i]]++;
+    for (i = 0; i < s->squareCount; i++) if (timesEaten[i] != 1) wrong++;
+    expectNumber("squares eaten other than exactly once", 0, wrong);
+    expect(s->dissolveOrder[0] != 0 || s->dissolveOrder[1] != 1, "the order to be shuffled");
+    free(timesEaten);
+    free(s);
+}
+
+static void dissolve_squares_are_a_thirty_second_of_the_shorter_side(void)
+{
+    Scene *s = emptyScene();
+    planDissolve(s);
+    expectNumber("square size on a 1280x720 screen", 22, s->squareSize);
+    expectNumber("squares across a 1280x720 screen", 59, s->squaresAcross);
+    expectNumber("squares on a 1280x720 screen", 59 * 33, s->squareCount);
+    s->vw = 1920; s->vh = 1080;
+    planDissolve(s);
+    expectNumber("square size on a 1920x1080 screen", 33, s->squareSize);
+    s->vw = 20; s->vh = 10;
+    planDissolve(s);
+    expectNumber("square size on a tiny screen", 1, s->squareSize);
+    s->vw = 30000; s->vh = 40;
+    planDissolve(s);
+    expect(s->squareCount <= MAX_DISSOLVE_SQUARES, "a very wide screen to use bigger squares rather than overflow");
+    free(s);
+}
+
+static void the_dissolve_takes_about_one_point_seven_seconds(void)
+{
+    Scene *s = emptyScene();
+    planDissolve(s);
+    s->phase = SCENE_DISSOLVING;
+    s->dissolveStart = 100000;
+    expectNumber("squares eaten at the start", 0, squaresEaten(s, 100000));
+    expectBetween("squares eaten half way", s->squareCount / 2 - 1, s->squareCount / 2 + 1,
+                  squaresEaten(s, 100000 + DISSOLVE_MS / 2));
+    expectNumber("squares eaten at the end", s->squareCount, squaresEaten(s, 100000 + DISSOLVE_MS));
+    free(s);
+}
+
+static void after_the_dissolve_a_fresh_scene_begins(void)
+{
+    SavedSettings saved = useSettings(0, JOINT_ELBOW);
+    Scene *s = sceneGrownFromSeed(5);
+    runSceneUntilItFinishes(s, NULL);
+    sceneTick(s);
+    sceneTick(s);
+    expectNumber("phase before the dissolve time is up (2 = dissolving)", SCENE_DISSOLVING, s->phase);
+    s->dissolveStart -= DISSOLVE_MS;
+    sceneTick(s);
+    expectNumber("phase after the dissolve (0 = growing)", SCENE_GROWING, s->phase);
+    expectNumber("pieces in the fresh scene", 2, s->nPrims);
+    free(s);
+    restoreSettings(saved);
+}
+
+static void each_new_scene_is_turned_a_little_further_than_the_last(void)
+{
+    Scene *s = sceneGrownFromSeed(2);
+    expectNear("turn of the first scene", 0.0, s->rotation);
+    startScene(s, 1);
+    expectNear("turn of the second scene (the original only starts turning from the third)", 0.0, s->rotation);
+    startScene(s, 1);
+    expectNear("turn of the third scene", SCENE_TURN_DEGREES, s->rotation);
+    startScene(s, 1);
+    expectNear("turn of the fourth scene", 2.0 * SCENE_TURN_DEGREES, s->rotation);
+    s->nextRotation = 355.0f;
+    startScene(s, 1);
+    expectNear("turn just before passing a full circle", 355.0, s->rotation);
+    startScene(s, 1);
+    expectNear("turn after passing a full circle", 355.0 + SCENE_TURN_DEGREES - 360.0, s->rotation);
+    free(s);
 }
 
 static void a_wider_screen_gets_more_columns_of_pipes(void)
@@ -664,31 +1114,66 @@ static void removeOldOutputs(void)
     FindClose(h);
 }
 
+static int openTestPicture(int width, int height)
+{
+    winW = width;
+    winH = height;
+    fullscreen = 0;
+    if (createGLWindow(GetModuleHandle(NULL), MODE_SHOT)) {
+        initGL();
+        return 1;
+    }
+    expect(0, "an OpenGL window to open");
+    destroyGLWindow();
+    drainQuitMessage();
+    restoreScreenDefaults();
+    return 0;
+}
+
+static void closeTestPicture(void)
+{
+    destroyGLWindow();
+    drainQuitMessage();
+    restoreScreenDefaults();
+}
+
+static double litShareOfFrame(int width, int height)
+{
+    unsigned char *pixels = (unsigned char *)malloc((size_t)width * height * 3);
+    long lit = 0, i;
+    if (!pixels) return -1.0;
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadBuffer(GL_BACK);
+    glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels);
+    for (i = 0; i < (long)width * height; i++)
+        if (pixels[i * 3] > 16 || pixels[i * 3 + 1] > 16 || pixels[i * 3 + 2] > 16) lit++;
+    free(pixels);
+    return (double)lit / ((double)width * height);
+}
+
+static double litShareWithSquaresEaten(Scene *s, int eaten)
+{
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    sceneDraw(s);
+    drawDissolve(s, eaten);
+    glFinish();
+    return litShareOfFrame(winW, winH);
+}
+
 static void a_screenshot_of_an_odd_sized_window_is_a_valid_bitmap(void)
 {
     const char *path = OUTPUT_DIR "\\odd-size.bmp";
     Bitmap b;
     int i;
-    winW = 333;
-    winH = 201;
-    fullscreen = 0;
     srand(9);
-    if (!createGLWindow(GetModuleHandle(NULL), MODE_SHOT)) {
-        expect(0, "an OpenGL window to open");
-        destroyGLWindow();
-        drainQuitMessage();
-        restoreScreenDefaults();
-        return;
-    }
-    initGL();
+    if (!openTestPicture(333, 201)) return;
     createScenes();
     for (i = 0; i < 140; i++) tickAll();
     drawAll();
     glFinish();
     expect(saveBMP(path, winW, winH), "the screenshot to be written");
-    destroyGLWindow();
-    drainQuitMessage();
-    restoreScreenDefaults();
+    closeTestPicture();
     b = loadBitmap(path);
     expect(b.loaded, "the screenshot to be a readable bitmap");
     expectNumber("width", 333, b.width);
@@ -700,6 +1185,28 @@ static void a_screenshot_of_an_odd_sized_window_is_a_valid_bitmap(void)
     expectNumber("declared file size", 54 + 1000 * 201, b.declaredSize);
     expectNumber("actual file size", 54 + 1000 * 201, b.fileSize);
     freeBitmap(&b);
+}
+
+static void black_squares_eat_the_finished_picture_until_nothing_is_left(void)
+{
+    SavedSettings saved = useSettings(1, JOINT_MIXED);
+    Scene *s;
+    double before, halfway, after;
+    srand(21);
+    if (!openTestPicture(400, 300)) { restoreSettings(saved); return; }
+    createScenes();
+    s = scenes[0];
+    runSceneUntilItFinishes(s, NULL);
+    sceneTick(s);
+    before = litShareWithSquaresEaten(s, 0);
+    halfway = litShareWithSquaresEaten(s, s->squareCount / 2);
+    after = litShareWithSquaresEaten(s, s->squareCount);
+    closeTestPicture();
+    expect(before > 0.05, "the finished picture to show plenty of pipes");
+    if (before > 0.0)
+        expectBetween("share of the picture left half way through", 0.35, 0.65, halfway / before);
+    expectBetween("share of the picture left at the end", 0.0, 0.0, after);
+    restoreSettings(saved);
 }
 
 typedef struct {
@@ -1049,23 +1556,52 @@ int main(int argc, char **argv)
     run(slash_p_asks_for_the_preview_pane);
 
     heading("Growing pipes");
-    run(a_new_scene_starts_every_pipe_on_its_own_free_node_with_a_cap);
+    run(a_new_scene_starts_its_pipe_with_a_cap_and_a_first_stretch_of_pipe);
     run(a_pipe_only_ever_moves_one_node_at_a_time);
     run(a_pipe_never_moves_into_a_node_that_is_already_taken);
     run(a_pipe_never_turns_straight_back_on_itself);
     run(pipes_never_leave_the_grid);
     run(going_straight_lengthens_the_current_pipe_instead_of_adding_a_piece);
+    run(a_long_runner_always_goes_straight_while_the_way_ahead_is_free);
+    run(a_pipe_turns_whenever_the_way_ahead_is_blocked);
+    run(a_short_runner_goes_straight_in_proportion_to_its_weight);
+    run(about_one_pipe_in_twenty_is_a_long_runner);
     run(the_same_seed_always_grows_the_same_pipes);
 
     heading("Joints");
-    run(a_ball_joint_is_a_big_sphere_with_the_new_pipe_starting_at_its_centre);
-    run(an_elbow_pulls_the_incoming_pipe_back_by_the_bend_radius);
-    run(about_one_turn_in_four_gets_a_ball_joint);
+    run(with_elbow_joints_every_turn_is_an_elbow_that_pulls_the_incoming_pipe_back);
+    run(with_ball_joints_every_turn_is_a_big_sphere_with_the_new_pipe_leaving_its_centre);
+    run(with_mixed_joints_about_one_turn_in_three_is_a_ball);
+    run(with_cycling_joints_each_scene_moves_on_from_elbows_to_balls_to_mixed);
+    run(a_fixed_joint_style_stays_the_same_in_every_scene);
 
-    heading("Scene lifecycle");
-    run(a_pipe_with_nowhere_to_go_gets_an_end_cap_and_a_replacement);
-    run(the_scene_pauses_after_twelve_finished_pipes_and_then_starts_over);
-    run(a_full_picture_starts_over_instead_of_overflowing);
+    heading("How many pipes");
+    run(single_pipe_mode_grows_one_pipe_at_a_time_and_five_pipes_per_scene);
+    run(multiple_pipe_mode_starts_two_to_four_pipes_together);
+    run(multiple_pipe_mode_draws_seven_pipes_per_scene);
+    run(a_stuck_pipe_gets_an_end_cap_and_a_replacement_while_the_budget_lasts);
+    run(once_the_budget_is_spent_a_stuck_pipe_retires_and_the_scene_finishes);
+    run(a_pipe_that_cannot_find_a_free_node_ends_the_scene_early);
+    run(a_pipe_that_starts_boxed_in_is_finished_at_once);
+    run(a_full_picture_finishes_the_scene_instead_of_overflowing);
+
+    heading("Chase scenes");
+    run(about_one_multiple_pipe_scene_in_five_becomes_a_chase);
+    run(single_pipe_scenes_never_chase);
+    run(once_a_chase_has_started_every_later_scene_is_a_chase_like_the_original);
+    run(in_a_chase_the_other_pipes_head_towards_the_lead);
+    run(a_chasing_pipe_that_cannot_head_for_the_lead_takes_any_free_way);
+    run(the_lead_restarts_in_the_far_corner_from_where_it_got_stuck);
+    run(when_the_lead_retires_another_pipe_takes_over_the_lead);
+
+    heading("End of a scene");
+    run(a_finished_picture_stays_for_one_step_before_it_starts_to_dissolve);
+    run(the_dissolve_eats_every_square_exactly_once);
+    run(dissolve_squares_are_a_thirty_second_of_the_shorter_side);
+    run(the_dissolve_takes_about_one_point_seven_seconds);
+    run(after_the_dissolve_a_fresh_scene_begins);
+    run(each_new_scene_is_turned_a_little_further_than_the_last);
+    run(black_squares_eat_the_finished_picture_until_nothing_is_left);
 
     heading("Screen layout");
     run(a_wider_screen_gets_more_columns_of_pipes);
