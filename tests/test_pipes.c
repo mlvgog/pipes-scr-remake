@@ -1757,6 +1757,7 @@ static HWND waitForPreviewInside(HWND parent, Program *p)
 static Program startPreviewIn(HWND parent)
 {
     char arguments[64];
+    expect(parent != NULL, "the test to be able to open a window for the preview");
     snprintf(arguments, sizeof arguments, "/p %llu", (unsigned long long)(UINT_PTR)parent);
     return startPipes(arguments);
 }
@@ -1815,6 +1816,42 @@ static void the_preview_pane_closes_when_its_window_closes(void)
     }
     stopPipes(&p);
     if (parent) DestroyWindow(parent);
+}
+
+static double cpuSecondsUsed(Program *p)
+{
+    FILETIME created, exited, kernel, user;
+    ULARGE_INTEGER k, u;
+    if (!GetProcessTimes(p->info.hProcess, &created, &exited, &kernel, &user)) return -1.0;
+    k.LowPart = kernel.dwLowDateTime; k.HighPart = kernel.dwHighDateTime;
+    u.LowPart = user.dwLowDateTime; u.HighPart = user.dwHighDateTime;
+    return (double)(k.QuadPart + u.QuadPart) / 1e7;
+}
+
+static void the_preview_pane_rests_between_steps_instead_of_spinning(void)
+{
+    HWND parent = openSettingsLikeWindow(152, 112);
+    Program p = startPreviewIn(parent);
+    HWND preview = waitForPreviewInside(parent, &p);
+    double before, after;
+    expect(preview != NULL, "a pipes window to appear inside the given window");
+    if (preview) {
+        pumpMessagesFor(500);
+        before = cpuSecondsUsed(&p);
+        pumpMessagesFor(3000);
+        after = cpuSecondsUsed(&p);
+        expectBetween("processor seconds used by the preview over 3 seconds", 0.0, 1.0, after - before);
+    }
+    stopPipes(&p);
+    DestroyWindow(parent);
+}
+
+static void the_main_loop_rests_until_the_next_step_or_dissolve_frame(void)
+{
+    expectNumber("rest right after a step (ms)", (long long)STEP_MS, restBeforeNextFrame(0.0, 0));
+    expectNumber("rest when a step is due", 0, restBeforeNextFrame(STEP_MS, 0));
+    expectNumber("rest right after a step while dissolving (ms)", DISSOLVE_FRAME_MS, restBeforeNextFrame(0.0, 1));
+    expectNumber("rest when less than a millisecond is left", 0, restBeforeNextFrame(STEP_MS - 0.5, 0));
 }
 
 static void a_preview_for_a_window_that_does_not_exist_exits_straight_away(void)
@@ -1944,6 +1981,8 @@ int main(int argc, char **argv)
     run(the_preview_pane_fills_the_little_window_it_is_given);
     run(the_preview_pane_ignores_keys_and_clicks);
     run(the_preview_pane_closes_when_its_window_closes);
+    run(the_preview_pane_rests_between_steps_instead_of_spinning);
+    run(the_main_loop_rests_until_the_next_step_or_dissolve_frame);
     run(a_preview_for_a_window_that_does_not_exist_exits_straight_away);
     run(a_preview_without_a_window_handle_exits_straight_away);
 
