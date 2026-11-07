@@ -256,3 +256,15 @@ client area. It ignores input-to-exit and quits when the parent goes away.
   - 100 tests pass.
   - Test lesson: a dialog owned by a window in the test process needs the
     test to pump messages while the dialog is created.
+  - Opened #5 and sent the owner the dialog screenshot.
+  - Review fixes:
+    - The dialog template buffer is bounds-checked (a test leaves a quarter
+      free for the Surface Style group).
+    - A failed settings save shows "3D Pipes could not save its settings."
+      and exits 1. The test forces it with a permanent key under a
+      volatile one, which Windows and Wine both refuse.
+    - The dialog centres over its `/c:` owner.
+    - The `.scr` test copy is cleaned up.
+  - Skipped: folding the globals into one `Settings` (refactor only).
+  - 102 tests pass.
+

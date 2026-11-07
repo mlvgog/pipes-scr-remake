@@ -235,6 +235,14 @@ static void applying_settings_sets_the_pipes_joints_sides_and_speed(void)
     restoreSettings(saved);
 }
 
+static void the_dialog_template_fits_its_buffer_with_room_to_grow(void)
+{
+    DialogTemplate t;
+    expect(buildSettingsDialog(&t), "the template to fit");
+    expectNumber("controls in the template", 15, t.items);
+    expect(t.used < TEMPLATE_WORDS * 3 / 4, "at least a quarter of the template buffer to be left for more controls");
+}
+
 static HWND openSettingsDialogHere(Settings *s)
 {
     DialogTemplate t;
@@ -2149,8 +2157,15 @@ static void the_setup_dialog_belongs_to_the_window_that_asked_for_it(void)
     }
     expect(dlg != NULL, "the 3D Pipes Setup dialog to appear");
     if (dlg) {
+        RECT o, d;
         pumpMessagesFor(DIALOG_SETTLE_MS);
         expect(GetWindow(dlg, GW_OWNER) == owner, "the dialog to be owned by the window given with /c:");
+        GetWindowRect(owner, &o);
+        GetWindowRect(dlg, &d);
+        expectBetween("horizontal distance between the dialog's and the window's centres",
+                      -2, 2, (d.left + d.right) / 2 - (o.left + o.right) / 2);
+        expectBetween("vertical distance between the dialog's and the window's centres",
+                      -2, 2, (d.top + d.bottom) / 2 - (o.top + o.bottom) / 2);
         expect(clickButtonLabelled(dlg, "Cancel"), "the dialog to have a Cancel button");
         expect(finishesWhilePumpingMessages(&p, 10000, NULL), "pressing Cancel to end the program");
     }
@@ -2164,7 +2179,11 @@ static void double_clicking_the_scr_file_opens_the_setup_dialog(void)
     Program p;
     HWND dlg;
     snprintf(scrPath, sizeof scrPath, OUTPUT_DIR "\\pipes-test.scr");
-    expect(CopyFileA(pipesExe, scrPath, FALSE), "the program to be copied as a .scr file");
+    DeleteFileA(scrPath);
+    if (!CopyFileA(pipesExe, scrPath, FALSE)) {
+        expect(0, "the program to be copied as a .scr file");
+        return;
+    }
     {
         char saved[MAX_PATH];
         snprintf(saved, sizeof saved, "%s", pipesExe);
@@ -2179,6 +2198,40 @@ static void double_clicking_the_scr_file_opens_the_setup_dialog(void)
         expect(finishesWithin(&p, 10000, NULL), "pressing Cancel to end the program");
     }
     stopPipes(&p);
+    DeleteFileA(scrPath);
+}
+
+static void a_settings_save_that_fails_is_reported_and_ends_with_an_error(void)
+{
+    const char *volatileParent = "Software\\pipes-scr-remake-volatile-test";
+    HKEY parent;
+    Program p;
+    HWND dlg, box;
+    DWORD code = 0;
+    RegDeleteKeyA(HKEY_CURRENT_USER, volatileParent);
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, volatileParent, 0, NULL, REG_OPTION_VOLATILE, KEY_WRITE, NULL,
+                        &parent, NULL) != ERROR_SUCCESS) {
+        expect(0, "the test to be able to make a temporary registry key");
+        return;
+    }
+    RegCloseKey(parent);
+    SetEnvironmentVariableA(SETTINGS_KEY_VARIABLE, "Software\\pipes-scr-remake-volatile-test\\settings");
+    p = startPipes("/c");
+    SetEnvironmentVariableA(SETTINGS_KEY_VARIABLE, TEST_SETTINGS_KEY);
+    dlg = waitForSettingsDialog(&p);
+    expect(dlg != NULL, "the 3D Pipes Setup dialog to appear");
+    if (dlg) {
+        expect(clickButtonLabelled(dlg, "OK"), "the dialog to have an OK button");
+        Sleep(DIALOG_SETTLE_MS);
+        box = waitForWindow(&p, "#32770");
+        expect(box != NULL && windowShowsText(box, "3D Pipes could not save its settings."),
+               "a message to say the settings could not be saved");
+        if (box) clickButtonLabelled(box, "OK");
+        expect(finishesWithin(&p, 10000, &code), "the program to end after the message");
+        expectNumber("exit code", 1, code);
+    }
+    stopPipes(&p);
+    RegDeleteKeyA(HKEY_CURRENT_USER, volatileParent);
 }
 
 static void saved_settings_change_what_the_screensaver_draws(void)
@@ -2328,6 +2381,7 @@ int main(int argc, char **argv)
     run(saved_settings_come_back_exactly);
     run(nonsense_in_the_registry_falls_back_to_safe_values);
     run(applying_settings_sets_the_pipes_joints_sides_and_speed);
+    run(the_dialog_template_fits_its_buffer_with_room_to_grow);
     run(the_settings_dialog_has_the_xp_setup_controls);
     run(the_settings_dialog_starts_from_the_current_settings);
     run(pressing_ok_takes_the_choices_from_the_dialog);
@@ -2337,6 +2391,7 @@ int main(int argc, char **argv)
     run(cancelling_the_setup_dialog_saves_nothing);
     run(the_setup_dialog_belongs_to_the_window_that_asked_for_it);
     run(double_clicking_the_scr_file_opens_the_setup_dialog);
+    run(a_settings_save_that_fails_is_reported_and_ends_with_an_error);
     run(saved_settings_change_what_the_screensaver_draws);
 
     forgetTestSettings();

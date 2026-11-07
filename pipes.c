@@ -1354,14 +1354,18 @@ static int runInteractive(void)
 
 enum { ID_SINGLE = 101, ID_MULTIPLE, ID_JOINT_TYPE, ID_SPEED, ID_RESOLUTION };
 
+#define TEMPLATE_WORDS 2048
+
 typedef struct {
-    DWORD storage[1024];
+    DWORD storage[TEMPLATE_WORDS / 2];
     int   used;
     int   items;
+    int   overflowed;
 } DialogTemplate;
 
 static void templateWord(DialogTemplate *t, WORD w)
 {
+    if (t->used >= TEMPLATE_WORDS) { t->overflowed = 1; return; }
     ((WORD *)t->storage)[t->used++] = w;
 }
 
@@ -1423,7 +1427,7 @@ static void templateControl(DialogTemplate *t, WORD controlClass, const char *te
 #define SCROLLBAR_CLASS 0x0084
 #define COMBOBOX_CLASS  0x0085
 
-static void buildSettingsDialog(DialogTemplate *t)
+static int buildSettingsDialog(DialogTemplate *t)
 {
     templateBegin(t, "3D Pipes Setup", 212, 150);
     templateControl(t, BUTTON_CLASS, "Pipes", 0xFFFF, BS_GROUPBOX, 7, 7, 95, 42);
@@ -1441,6 +1445,7 @@ static void buildSettingsDialog(DialogTemplate *t)
     templateControl(t, STATIC_CLASS, "Max", 0xFFFF, SS_RIGHT, 177, 101, 22, 8);
     templateControl(t, BUTTON_CLASS, "OK", IDOK, BS_DEFPUSHBUTTON | WS_TABSTOP | WS_GROUP, 99, 128, 50, 14);
     templateControl(t, BUTTON_CLASS, "Cancel", IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP, 155, 128, 50, 14);
+    return !t->overflowed;
 }
 
 static void setSlider(HWND bar, int highest, int position)
@@ -1489,12 +1494,26 @@ static void readSettingsFromDialog(HWND dlg, Settings *s)
     s->resolution = GetScrollPos(GetDlgItem(dlg, ID_RESOLUTION), SB_CTL);
 }
 
+static void centreOverOwner(HWND dlg)
+{
+    HWND owner = GetWindow(dlg, GW_OWNER);
+    RECT o, d;
+    if (!owner) return;
+    GetWindowRect(owner, &o);
+    GetWindowRect(dlg, &d);
+    SetWindowPos(dlg, NULL,
+                 (o.left + o.right) / 2 - (d.right - d.left) / 2,
+                 (o.top + o.bottom) / 2 - (d.bottom - d.top) / 2,
+                 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 static INT_PTR CALLBACK settingsDialogProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
     case WM_INITDIALOG:
         SetWindowLongPtrA(dlg, DWLP_USER, lp);
         showSettingsInDialog(dlg, (const Settings *)lp);
+        centreOverOwner(dlg);
         return TRUE;
     case WM_HSCROLL:
         moveSlider((HWND)lp, wp);
@@ -1517,7 +1536,7 @@ static INT_PTR CALLBACK settingsDialogProc(HWND dlg, UINT msg, WPARAM wp, LPARAM
 static int runSettingsDialog(HWND owner, Settings *s)
 {
     DialogTemplate t;
-    buildSettingsDialog(&t);
+    if (!buildSettingsDialog(&t)) return 0;
     if (owner && !IsWindow(owner)) owner = NULL;
     return DialogBoxIndirectParamA(GetModuleHandle(NULL), (LPCDLGTEMPLATEA)t.storage, owner,
                                    settingsDialogProc, (LPARAM)s) == IDOK;
@@ -1541,8 +1560,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
     parseCommandLine(cmdLine, runningAsScrFile(), &options);
     settings = loadSettings();
     if (options.mode == MODE_CONFIGURE) {
-        if (runSettingsDialog(options.ownerWindow, &settings)) saveSettings(&settings);
-        return 0;
+        if (!runSettingsDialog(options.ownerWindow, &settings)) return 0;
+        if (saveSettings(&settings)) return 0;
+        MessageBoxA(IsWindow(options.ownerWindow) ? options.ownerWindow : NULL,
+                    "3D Pipes could not save its settings.", WINDOW_TITLE, MB_OK | MB_ICONERROR);
+        return 1;
     }
     applySettings(&settings);
     if (options.mode == MODE_PREVIEW) {
