@@ -21,14 +21,22 @@ Win32 and fixed-function OpenGL 1.1 — the same technology as the original.
   perspective volume against a black void.
 - Glossy, smooth-shaded pipes in random bright colors (one directional
   light, strong specular highlight).
-- **Elbow joints**: proper quarter-torus bends where a pipe turns.
-- **Ball joints**: occasionally a turn gets the big bulging sphere instead
-  (the original's "mixed joints" mode).
+- **Joints** in the original's four styles: elbows (quarter-torus bends),
+  balls (the big bulging sphere), mixed (about one turn in three gets a
+  ball) and cycle (elbows, then balls, then mixed, changing every scene).
 - Sphere caps where a pipe starts and where it ends.
-- Several pipes grow simultaneously; a pipe runs until it boxes itself in,
-  then a new one starts elsewhere.
-- When the scene has filled up, it holds for a moment, clears to black
-  abruptly, and starts over — just like the original.
+- The original's growth rules: each pipe has its own taste for going
+  straight (most turn often, about one in twenty is a "long runner" that
+  only turns when it must), and a pipe runs until it boxes itself in.
+- **Single** mode grows one pipe at a time, five per scene. **Multiple**
+  mode starts two to four at once and draws seven per scene; about one
+  multiple-pipe scene in five becomes a **chase**, where the other pipes
+  follow a lead pipe around, and (as in the original) once a chase has
+  happened every later scene is a chase too.
+- When a scene's pipes are used up, the finished picture is eaten by
+  **small black squares in random order** (the original's "digital
+  dissolve"), and the next scene is viewed from a little further round
+  (9.73° per scene).
 - **Multi-monitor**: fullscreen mode covers the entire virtual desktop and
   runs an independent pipes scene on every monitor (an improvement over the
   original, which left secondary monitors showing the desktop). Input on
@@ -106,10 +114,10 @@ implemented:
 - **The teapot easter egg** — the original very rarely rendered a Utah
   teapot in place of a joint. Needs the teapot Bezier patch data.
 - **Configuration dialog** — the original let you choose pipe count
-  (single/multiple), joint style (elbow/ball/mixed), surface style
-  (solid/textured), and resolution. Here those are compile-time constants
-  at the top of `pipes.c` (`NUM_PIPES`, `P_BALL`, `STEP_MS`, …) and `/c`
-  just shows a message box.
+  (single/multiple), joint style (elbow/ball/mixed/cycle), surface style
+  (solid/textured), speed and resolution. Here those are compile-time
+  settings in `pipes.c` (`multiplePipes`, `jointStyleSetting`, `STEP_MS`,
+  …) and `/c` just shows a message box.
 - **Preview pane mode** — `/p <hwnd>` (the little preview inside the
   screensaver settings dialog) exits cleanly instead of rendering.
 - **Textured pipes** — the original's optional marble/texture surface mode.
@@ -117,6 +125,9 @@ implemented:
 ## Tuning
 
 All the knobs are constants at the top of [pipes.c](pipes.c): pipe radius,
-elbow/ball radii, number of simultaneous pipes (`NUM_PIPES`), growth speed
-(`STEP_MS`), straight-vs-turn and ball-vs-elbow probabilities, and how full
-the scene gets before resetting (`DEATHS_RESET`).
+elbow/ball radii, growth speed (`STEP_MS`), pipes per scene
+(`NORMAL_PIPES_PER_SCENE`, `MULTIPLE_PIPES_FACTOR`), straight-run weights,
+the ball share of mixed joints, the chase odds, the dissolve
+(`DISSOLVE_MS`, square size) and the per-scene turn. Single/multiple pipes
+and the joint style are `multiplePipes` and `jointStyleSetting` (Single and
+Elbow by default, as in the original) until the settings dialog arrives.
