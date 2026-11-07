@@ -378,16 +378,18 @@ static int findRandomFreeNode(const Scene *s, int *pos)
 static int freeNodesAtDistance(const Scene *s, const int *centre, int r, int wanted, int *pos)
 {
     int x, y, z, count = 0;
-    for (x = centre[0] - r; x <= centre[0] + r; x++)
-        for (y = centre[1] - r; y <= centre[1] + r; y++)
-            for (z = centre[2] - r; z <= centre[2] + r; z++) {
-                int dist = abs(x - centre[0]);
-                if (abs(y - centre[1]) > dist) dist = abs(y - centre[1]);
-                if (abs(z - centre[2]) > dist) dist = abs(z - centre[2]);
-                if (dist != r || !isFree(s, x, y, z)) continue;
+    int x0 = centre[0] - r < 0 ? 0 : centre[0] - r, x1 = centre[0] + r >= s->NX ? s->NX - 1 : centre[0] + r;
+    int y0 = centre[1] - r < 0 ? 0 : centre[1] - r, y1 = centre[1] + r >= s->NY ? s->NY - 1 : centre[1] + r;
+    for (x = x0; x <= x1; x++)
+        for (y = y0; y <= y1; y++) {
+            int onSide = abs(x - centre[0]) == r || abs(y - centre[1]) == r;
+            int zStep = onSide ? 1 : 2 * r;
+            for (z = centre[2] - r; z <= centre[2] + r; z += zStep > 0 ? zStep : 1) {
+                if (!isFree(s, x, y, z)) continue;
                 if (count == wanted) { pos[0] = x; pos[1] = y; pos[2] = z; }
                 count++;
             }
+        }
     return count;
 }
 

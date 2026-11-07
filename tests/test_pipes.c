@@ -242,7 +242,7 @@ static int sameNode(const float *a, const float *b)
     return fabs(a[0] - b[0]) < 1e-4 && fabs(a[1] - b[1]) < 1e-4 && fabs(a[2] - b[2]) < 1e-4;
 }
 
-static int isStartCap(const Scene *s, int i)
+static int isCap(const Scene *s, int i)
 {
     return s->prims[i].type == PRIM_SPH && s->prims[i].r == CAP_R;
 }
@@ -251,7 +251,7 @@ static int pipesDrawnInPicture(const Scene *s)
 {
     int i, caps = 0, pipesThatGrew = 0;
     for (i = 0; i < s->nPrims; i++) {
-        if (!isStartCap(s, i)) continue;
+        if (!isCap(s, i)) continue;
         caps++;
         if (i + 1 < s->nPrims && s->prims[i + 1].type == PRIM_CYL && sameNode(s->prims[i].a, s->prims[i + 1].a))
             pipesThatGrew++;
@@ -325,7 +325,7 @@ static void a_new_scene_starts_its_pipe_with_a_cap_and_a_first_stretch_of_pipe(v
     float now[3];
     expectNumber("pipes growing in a new single-pipe scene", 1, s->nPipes);
     expectNumber("pieces in a new scene", 2, s->nPrims);
-    expect(isStartCap(s, 0), "the first piece to be a start cap");
+    expect(isCap(s, 0), "the first piece to be a start cap");
     expect(s->prims[1].type == PRIM_CYL && sameNode(s->prims[0].a, s->prims[1].a),
            "the first stretch of pipe to leave from the cap");
     nodeWorld(s, p->x, p->y, p->z, now);
@@ -626,13 +626,13 @@ static void a_stuck_pipe_gets_an_end_cap_and_a_replacement_while_the_budget_last
     nodeWorld(s, 5, 5, 5, node);
     srand(3);
     growPipe(s, p);
-    expect(isStartCap(s, capIndex) && sameNode(s->prims[capIndex].a, node),
+    expect(isCap(s, capIndex) && sameNode(s->prims[capIndex].a, node),
            "an end cap where the pipe got stuck");
     expectNumber("pipe state after getting stuck (1 = stuck)", PIPE_STUCK, p->state);
     retireOrRestartStuckPipes(s);
     expectNumber("pipes still in the scene", 1, s->nPipes);
     expectNumber("state of the replacement (0 = growing)", PIPE_ACTIVE, s->pipes[0].state);
-    expect(isStartCap(s, capIndex + 1), "the replacement to begin with its own start cap");
+    expect(isCap(s, capIndex + 1), "the replacement to begin with its own start cap");
     expectNumber("pipes started so far", 2, s->pipesStarted);
     free(s);
 }
@@ -672,7 +672,6 @@ static void a_pipe_that_starts_boxed_in_is_finished_at_once(void)
 {
     Scene *s = emptyScene();
     Pipe p;
-    int i;
     occupyEverything(s);
     s->grid[5][5][5] = 0;
     memset(&p, 0, sizeof p);
@@ -681,8 +680,9 @@ static void a_pipe_that_starts_boxed_in_is_finished_at_once(void)
     expect(startPipe(s, &p), "the start itself to succeed");
     expectNumber("pipe state (1 = stuck)", PIPE_STUCK, p.state);
     expectNumber("pieces drawn for it", 1, s->nPrims);
-    for (i = 0; i < 3; i++)
-        expectNumber("pipe position", 5, i == 0 ? p.x : i == 1 ? p.y : p.z);
+    expectNumber("pipe x", 5, p.x);
+    expectNumber("pipe y", 5, p.y);
+    expectNumber("pipe z", 5, p.z);
     free(s);
 }
 
@@ -760,6 +760,26 @@ static void a_chasing_pipe_that_cannot_head_for_the_lead_takes_any_free_way(void
     occupyNeighboursExcept(s, 4, 5, 5, 5);
     srand(1);
     expectNumber("direction taken (5 = -z, the only free way)", 5, chooseDirection(s, follower));
+    free(s);
+}
+
+static void the_far_node_search_finds_exactly_the_free_nodes_at_each_distance(void)
+{
+    Scene *s = emptyScene();
+    int centre[3] = { 3, 3, 3 }, pos[3], r, x, y, z, wrong = 0;
+    for (r = 0; r <= 3; r++) {
+        int expected = 0;
+        for (x = 0; x < s->NX; x++)
+            for (y = 0; y < s->NY; y++)
+                for (z = 0; z < s->NZ; z++) {
+                    int d = abs(x - 3);
+                    if (abs(y - 3) > d) d = abs(y - 3);
+                    if (abs(z - 3) > d) d = abs(z - 3);
+                    if (d == r) expected++;
+                }
+        if (freeNodesAtDistance(s, centre, r, -1, pos) != expected) wrong++;
+    }
+    expectNumber("distances where the count of free nodes was wrong", 0, wrong);
     free(s);
 }
 
@@ -1591,6 +1611,7 @@ int main(int argc, char **argv)
     run(once_a_chase_has_started_every_later_scene_is_a_chase_like_the_original);
     run(in_a_chase_the_other_pipes_head_towards_the_lead);
     run(a_chasing_pipe_that_cannot_head_for_the_lead_takes_any_free_way);
+    run(the_far_node_search_finds_exactly_the_free_nodes_at_each_distance);
     run(the_lead_restarts_in_the_far_corner_from_where_it_got_stuck);
     run(when_the_lead_retires_another_pipe_takes_over_the_lead);
 

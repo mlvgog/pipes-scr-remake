@@ -25,14 +25,33 @@ merged with **rebase**.
 | 5 | `feature/settings-dialog`: XP "3D Pipes Setup" dialog + registry | to do |
 | 6 | `feature/textured-pipes`: Solid/Textured + "Choose Texture..." | to do |
 | 7 | `feature/teapot`: Utah teapot easter egg | to do |
+| 8 | `feature/release`: a really good first release | to do |
 
 ## Next step
 
-PR 2 is implemented and its 68 tests pass under Wine. Next:
+PR 2 is open as [#2](https://github.com/mlvgog/pipes-scr-remake/pull/2) and
+has been reviewed (fixes pushed). Next: green CI, put the review summary in
+the PR body, rebase-merge, then cut `feature/original-look` from the new
+`main`.
 
-1. Commit it on `feature/original-scene-rules`, push, and open the PR.
-2. Wait for CI, run the code review, fix what it finds, and rebase-merge.
-3. Then cut `feature/original-look` from the new `main`.
+## The release (PR 8)
+
+The owner considers releases a big thing and wants a really good one:
+
+- A tag-triggered GitHub Actions workflow on `windows-latest` builds
+  `pipes.exe` and `pipes.scr` with `-O2`.
+- The full test suite must pass before anything is published.
+- The release attaches the binaries, a zip and SHA-256 checksums.
+- Hand-written release notes include:
+  - what it is, with the AI-generation notice;
+  - a screenshot or render;
+  - install steps for the `.scr`;
+  - the settings;
+  - what matches the original and what's still missing;
+  - the test summary.
+- Add a CHANGELOG and a version string in the program (e.g. shown in the
+  settings dialog).
+- Cut it once PRs 2–7 are merged, after the owner has seen renders.
 
 ## How to build and test in a Linux cloud session
 
@@ -164,6 +183,11 @@ client area. It ignores input-to-exit and quits when the parent goes away.
     label.
   - Merged #1 by rebase.
 - **2026-11-07, PR 2:**
+  - Opened PR #2.
+  - Review fixes: the far-corner search only visits the shell at each
+    distance (a brute-force test checks it); clearer cap helpers in the
+    tests.
+  - The owner asked for a really good release, added as PR 8.
   - Implemented the original's scene rules (above).
   - Tests grew to 68, all passing under Wine.
   - The default render is now one pipe of elbows, as in the original's
