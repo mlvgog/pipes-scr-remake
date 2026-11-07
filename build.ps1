@@ -11,7 +11,7 @@ $env:PATH = (Split-Path $gcc) + ";" + $env:PATH
 $warnings = @("-Wall", "-Wextra")
 if ($Test) { $warnings += "-Werror" }
 
-& $gcc -O2 @warnings -o pipes.exe pipes.c -lopengl32 -lgdi32 -luser32 -mwindows
+& $gcc -O2 @warnings -o pipes.exe pipes.c -lopengl32 -lgdi32 -luser32 -ladvapi32 -mwindows
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Write-Host "Built pipes.exe"
 
@@ -20,7 +20,7 @@ if (-not $Test) {
     exit 0
 }
 
-& $gcc -O2 @warnings -o test_pipes.exe tests/test_pipes.c -lopengl32 -lgdi32 -luser32
+& $gcc -O2 @warnings -o test_pipes.exe tests/test_pipes.c -lopengl32 -lgdi32 -luser32 -ladvapi32
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Write-Host "Built test_pipes.exe"
 

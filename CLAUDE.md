@@ -9,7 +9,7 @@ A faithful recreation of the classic Windows "3D Pipes" screensaver
 [pipes.c](pipes.c), using Win32 + fixed-function OpenGL 1.1 — deliberately the
 same technology as the original. Keep it that way: no build system beyond the
 gcc command (plus a second one for the test suite), no external libraries
-beyond `opengl32`/`gdi32`/`user32`, no C++ — unless the user explicitly asks
+beyond `opengl32`/`gdi32`/`user32`/`advapi32` (the registry, for settings), no C++ — unless the user explicitly asks
 otherwise.
 
 The project was AI-generated (Anthropic Claude via Claude Code: Claude Fable 5
@@ -26,7 +26,7 @@ or directly (MSYS2 ucrt64 gcc lives at `C:\msys64\ucrt64\bin\gcc.exe` on the
 dev machine; it is NOT on PATH in Claude's shell):
 
 ```
-gcc -O2 -Wall -Wextra -o pipes.exe pipes.c -lopengl32 -lgdi32 -luser32 -mwindows
+gcc -O2 -Wall -Wextra -o pipes.exe pipes.c -lopengl32 -lgdi32 -luser32 -ladvapi32 -mwindows
 ```
 
 Treat `-Wall -Wextra` warnings as errors (the test build uses `-Werror`).
@@ -64,8 +64,8 @@ artifact.
 In a Linux cloud session, cross-compile and run under Wine instead:
 
 ```
-x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -o pipes.exe pipes.c -lopengl32 -lgdi32 -luser32 -mwindows
-x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -o test_pipes.exe tests/test_pipes.c -lopengl32 -lgdi32 -luser32
+x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -o pipes.exe pipes.c -lopengl32 -lgdi32 -luser32 -ladvapi32 -mwindows
+x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Werror -o test_pipes.exe tests/test_pipes.c -lopengl32 -lgdi32 -luser32 -ladvapi32
 WINEDEBUG=-all xvfb-run -a -s "-screen 0 1920x1080x24" wine test_pipes.exe
 ```
 
@@ -117,12 +117,27 @@ windowed (no args) and `/s`, each left running a few seconds, then killed.
 Single file, top-to-bottom in this order. All state lives in structs or
 file-scope statics; no dynamic allocation except one `calloc` per `Scene`.
 
+- **Settings** — `Settings` (multiple pipes, joint type, speed 0–100,
+  resolution 0–200) is loaded from `HKCU\Software\pipes-scr-remake`
+  (DWORD values `MultiplePipes`, `JointType`, `Speed`, `Resolution`;
+  missing or nonsense values fall back to the original's defaults) and
+  `applySettings` turns it into the globals the program uses
+  (`multiplePipes`, `jointStyleSetting`, `slices` via the original's
+  8/12/16/20 mapping, `stepMs` on a log scale 100 → 11 ms). The
+  environment variable `PIPES_SETTINGS_KEY` points the program at another
+  key; the test suite uses it so a developer's own settings are never
+  touched. The "3D Pipes Setup" dialog is built at run time from an
+  in-memory `DLGTEMPLATE` (`buildSettingsDialog`, standard user32
+  controls only — no `.rc` file, no comctl32) and run with
+  `DialogBoxIndirectParamA`; `/c[:hwnd]` makes the given window its owner,
+  and running the `.scr` with no arguments opens it too (that is what
+  Explorer's *Configure* does), while `pipes.exe` with no arguments stays
+  the windowed viewer.
 - **Tunables** — every visual/behavioral knob is a `#define` at the top
   (pipe/elbow/ball radii, `STEP_MS`, pipes per scene, straight weights,
   ball/chase odds, dissolve timing, per-scene turn, grid extents,
   tessellation). Tune look-and-feel here, not in the drawing code. The
-  user-facing options are the globals `multiplePipes` and
-  `jointStyleSetting` (`JOINT_ELBOW/BALL/MIXED/CYCLE`).
+  user-facing options come from Settings (below).
 - **Materials** — `TEA_MATERIALS` is the classic OpenGL "tea" material
   table (24 entries: ambient, diffuse, specular RGB + shininess/128);
   `PIPE_MATERIALS` lists the 16 the original picks pipes from.
@@ -267,7 +282,9 @@ file-scope statics; no dynamic allocation except one `calloc` per `Scene`.
 - Build artifacts (`*.exe`, `*.scr`, test BMP/PNGs) are gitignored;
   `preview.png` is the one committed image. If a change alters the look,
   regenerate `preview.png` from a ~140-step `/shot` render and mention it in
-  the commit.
+  the commit. The committed one is `/shot preview.bmp 140 7` with Multiple
+  pipes and Mixed joints saved (point `PIPES_SETTINGS_KEY` at a scratch key
+  holding `MultiplePipes`=1 and `JointType`=2, then delete it).
 - README must keep: the AI-generation notice (with model name), build +
   `.scr` install instructions, and the missing-features list. When you
   implement something from that list, remove it from the list in the same
@@ -277,5 +294,4 @@ file-scope statics; no dynamic allocation except one `calloc` per `Scene`.
 
 - Teapot easter egg (needs Utah teapot Bezier patch data — do not hand-type
   it from memory; fetch real data).
-- Configuration dialog (`/c` is a stub; options are compile-time constants).
 - Textured pipes (the original's optional surface mode).
