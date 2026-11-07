@@ -118,30 +118,48 @@ Single file, top-to-bottom in this order. All state lives in structs or
 file-scope statics; no dynamic allocation except one `calloc` per `Scene`.
 
 - **Tunables** — every visual/behavioral knob is a `#define` at the top
-  (pipe/elbow/ball radii, `NUM_PIPES`, `STEP_MS`, turn/joint probabilities,
-  `DEATHS_RESET`, grid extents, tessellation). Tune look-and-feel here, not
-  in the drawing code.
+  (pipe/elbow/ball radii, `STEP_MS`, pipes per scene, straight weights,
+  ball/chase odds, dissolve timing, per-scene turn, grid extents,
+  tessellation). Tune look-and-feel here, not in the drawing code. The
+  user-facing options are the globals `multiplePipes` and
+  `jointStyleSetting` (`JOINT_ELBOW/BALL/MIXED/CYCLE`).
 - **`Prim`** — one drawn primitive: cylinder (start point + axis direction +
   length), sphere (center + radius), or elbow (grid node + in/out
   directions). The whole picture is a flat append-only list of prims that is
   re-rendered every frame; "growing" a straight pipe just increments the
   `len` of its last cylinder prim, and a turn retracts that cylinder by
   `ELBOW_R` before inserting the torus.
-- **`Pipe`** — a walker on the grid: position, direction, the prim index of
-  the cylinder it is extending (`lastCyl`), color.
+- **`Pipe`** — a walker on the grid: `state` (`PIPE_ACTIVE`, `PIPE_STUCK`,
+  `PIPE_OUT_OF_NODES`), position, direction, its own `weightStraight`,
+  chase roles (`followsLead`, `startsFarAway`), the prim index of the
+  cylinder it is extending (`lastCyl`), color.
 - **`Scene`** — one fully independent simulation + camera: occupancy grid,
-  prim list, `NUM_PIPES` pipes, death/holding reset state, viewport rect and
-  derived projection (`aspect`, `dFront`, `camZ`, grid extents `NX/NY/NZ`).
-  Fullscreen creates one `Scene` per monitor (`EnumDisplayMonitors`);
-  windowed and `/shot` modes use a single Scene covering the client area.
-- **Simulation** (`stepPipe`, `spawnPipe`, `killPipe`, `sceneReset`,
-  `sceneTick`) — each tick every live pipe moves one cell, preferring
-  straight (`P_STRAIGHT`); a boxed-in pipe gets an end cap and is replaced;
-  after `DEATHS_RESET` deaths the scene holds `HOLD_MS` then clears —
-  replicating the original's abrupt reset.
-- **Rendering** (`sceneDraw`, `drawAll`) — three display lists built once
-  (cylinder, sphere, quarter-torus elbow); per frame: one clear, then each
-  scene sets its own viewport + frustum and replays its prim list.
+  prim list, up to `MAX_PIPES_AT_ONCE` pipes, the scene's pipe budget and
+  count (`pipeBudget`, `pipesStarted`), chase state (`chase`, `lead`), the
+  current `jointStyle`, `phase` (`SCENE_GROWING` → `SCENE_FINISHED` →
+  `SCENE_DISSOLVING`), the dissolve plan, the per-scene `rotation`, viewport
+  rect and derived projection (`aspect`, `dFront`, `camZ`, grid extents
+  `NX/NY/NZ`). Fullscreen creates one `Scene` per monitor
+  (`EnumDisplayMonitors`); windowed and `/shot` modes use a single Scene
+  covering the client area.
+- **Simulation** — the original's rules. `startScene` sets the budget
+  (5 pipes; ×1.5 = 7 with `multiplePipes`, starting 2–4 at once), rolls a
+  chase (1 in 5, sticky like the original), advances a cycling joint style
+  and sets the rotation (the original's timing: the first two scenes share
+  0°, then +9.73156° each). `sceneTick` retires or restarts stuck pipes
+  (`retireOrRestartStuckPipes`; a restart counts against the budget), then
+  `growPipe`s each one: `chooseDirection` is a weighted draw over
+  `weightStraight` + free turns (weight 100 = always straight), or for a
+  chase follower a step towards the lead. With no pipes left the scene is
+  `SCENE_FINISHED` for one tick, then `beginDissolve` plans a random order
+  of squares (`planDissolve`, min(w,h)/32 px, alternating linear probe
+  like the original) that `drawDissolve` paints black over `DISSOLVE_MS`,
+  then the next scene starts.
+- **Rendering** (`sceneDraw`, `drawDissolve`, `drawAll`) — three display
+  lists built once (cylinder, sphere, quarter-torus elbow); per frame: one
+  clear, then each scene sets its own viewport + frustum, applies its
+  rotation, replays its prim list, and paints its eaten dissolve squares as
+  black quads in a viewport-sized ortho projection.
 - **Win32 plumbing** — `parseCommandLine` turns the screensaver argument
   contract (`/s`, `/c`, `/p`, plus the custom `/shot`) into a
   `LaunchOptions`; `createGLWindow`/`destroyGLWindow` own the window and
@@ -208,6 +226,11 @@ file-scope statics; no dynamic allocation except one `calloc` per `Scene`.
   after review and with the CI test run green. Never push to `main`
   directly. Merge with rebase so the individual commits (the design log)
   survive.
+- Keep [WORKLOG.md](WORKLOG.md) current at every step (roadmap status,
+  the next step, a dated log entry, and any research facts the next steps
+  depend on) and commit it with the work, pushing work in progress to the
+  feature branch promptly, so the work can always be resumed from the
+  repository alone.
 - Commit style: imperative subject; a detailed body explaining what, why,
   the design decisions, and how it was verified — the history doubles as the
   project's design log. End with a `Co-Authored-By:` trailer naming the
